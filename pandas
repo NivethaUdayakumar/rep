@@ -1,0 +1,10 @@
+import pandas as pd
+
+df = pd.DataFrame({
+    "Name": ["Alice", "Bob", "Alice", "Charlie", "Bob"],
+    "Score": [85, 90, 88, 95, 82]
+})
+
+print(df["Name"].unique())                  # ['Alice' 'Bob' 'Charlie']
+print(df[df["Name"] == "Alice"])            # only Alice’s rows
+print(df.drop_duplicates(subset=["Name"]))  # one row per Name
