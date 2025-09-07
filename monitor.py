@@ -1,88 +1,145 @@
 #!/usr/bin/env python3
-import time, csv, os
+import time, csv, os, argparse
 from datetime import datetime
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
-CSV_FILE = "file_event_counts.csv"
-FIELDS = ["path", "created", "deleted", "last_created", "last_deleted"]
+CSV_FILE = "file_state_counts.csv"
+FIELDS = ["path", "state", "created_count", "deleted_count", "last_changed"]
 
 WATCH_FILES = [
     "/tmp/test/a.txt",
     "/tmp/test/b.log",
-    "/tmp/test/config.json"
+    "/tmp/test/config.json",
 ]
 
-def now():
+def current_timestamp():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-class FileListHandler(FileSystemEventHandler):
-    def __init__(self, watch_files):
-        super().__init__()
-        self.watch_files = set(os.path.abspath(f) for f in watch_files)
-        self.rows = {}
-        self._load_csv()
+class FileStateDatabase:
+    """Keeps track of file states and counters, synchronized with a CSV file."""
 
-    # ----- CSV I/O -----
-    def _load_csv(self):
-        if not os.path.exists(CSV_FILE):
+    def __init__(self, csv_path):
+        self.csv_path = csv_path
+        self.records = {}  # path -> record dictionary
+        self._load_from_csv()
+
+    def _load_from_csv(self):
+        if os.path.exists(self.csv_path):
+            with open(self.csv_path, "r", newline="") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    row["created_count"] = int(row["created_count"])
+                    row["deleted_count"] = int(row["deleted_count"])
+                    self.records[row["path"]] = row
+
+        # Ensure all watched files exist in records
+        for file_path in WATCH_FILES:
+            abs_path = os.path.abspath(file_path)
+            if abs_path not in self.records:
+                self.records[abs_path] = {
+                    "path": abs_path,
+                    "state": "missing",
+                    "created_count": 0,
+                    "deleted_count": 0,
+                    "last_changed": "",
+                }
+
+    def save_if_updated(self, update_required):
+        """Write CSV only if there were state changes."""
+        if not update_required:
             return
-        with open(CSV_FILE, "r", newline="") as f:
-            r = csv.DictReader(f)
-            for row in r:
-                row["created"] = int(row["created"])
-                row["deleted"] = int(row["deleted"])
-                self.rows[row["path"]] = row
+        with open(self.csv_path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=FIELDS)
+            writer.writeheader()
+            for path in sorted(self.records.keys()):
+                writer.writerow(self.records[path])
 
-    def _save_csv(self):
-        with open(CSV_FILE, "w", newline="") as f:
-            w = csv.DictWriter(f, fieldnames=FIELDS)
-            w.writeheader()
-            for row in self.rows.values():
-                w.writerow(row)
+    def get_state(self, path):
+        return self.records[path]["state"]
 
-    def _touch(self, path):
-        if path not in self.rows:
-            self.rows[path] = {
-                "path": path,
-                "created": 0,
-                "deleted": 0,
-                "last_created": "",
-                "last_deleted": ""
-            }
-        return self.rows[path]
+    def update_state(self, path, new_state):
+        """Change state if needed and update counters/timestamps."""
+        record = self.records[path]
+        if record["state"] == new_state:
+            return False  # No change
+        record["state"] = new_state
+        if new_state == "exists":
+            record["created_count"] += 1
+        elif new_state == "missing":
+            record["deleted_count"] += 1
+        record["last_changed"] = current_timestamp()
+        return True  # State actually changed
 
-    # ----- Event Handlers -----
+class FileListEventHandler(FileSystemEventHandler):
+    """Handles filesystem events for only the monitored file list."""
+
+    def __init__(self, database, watch_files):
+        super().__init__()
+        self.db = database
+        self.watch_files = set(os.path.abspath(f) for f in watch_files)
+
     def on_created(self, event):
+        if event.is_directory:
+            return
         abs_path = os.path.abspath(event.src_path)
-        if not event.is_directory and abs_path in self.watch_files:
-            row = self._touch(abs_path)
-            row["created"] += 1
-            row["last_created"] = now()
-            print(f"[CREATED] {abs_path} (count={row['created']})")
-            self._save_csv()
+        if abs_path in self.watch_files:
+            state_changed = self.db.update_state(abs_path, "exists")
+            self.db.save_if_updated(state_changed)
+            if state_changed:
+                print(f"[STATE CHANGE] {abs_path} -> exists "
+                      f"(created_count={self.db.records[abs_path]['created_count']})")
 
     def on_deleted(self, event):
+        if event.is_directory:
+            return
         abs_path = os.path.abspath(event.src_path)
-        if not event.is_directory and abs_path in self.watch_files:
-            row = self._touch(abs_path)
-            row["deleted"] += 1
-            row["last_deleted"] = now()
-            print(f"[DELETED] {abs_path} (count={row['deleted']})")
-            self._save_csv()
+        if abs_path in self.watch_files:
+            state_changed = self.db.update_state(abs_path, "missing")
+            self.db.save_if_updated(state_changed)
+            if state_changed:
+                print(f"[STATE CHANGE] {abs_path} -> missing "
+                      f"(deleted_count={self.db.records[abs_path]['deleted_count']})")
 
-def monitor(path="."):
-    handler = FileListHandler(WATCH_FILES)
-    obs = Observer()
-    obs.schedule(handler, path, recursive=True)  # must recurse to catch nested files
-    obs.start()
-    print(f"Monitoring only these files:\n" + "\n".join(WATCH_FILES))
+def reconcile_on_start(database):
+    """Sync CSV records with actual filesystem states at startup."""
+    update_required = False
+    for path in database.records.keys():
+        exists_now = os.path.exists(path)
+        expected_state = "exists" if exists_now else "missing"
+        update_required |= database.update_state(path, expected_state)
+    database.save_if_updated(update_required)
+    if update_required:
+        print("[Startup] CSV reconciled with current filesystem states.")
+    else:
+        print("[Startup] No changes; CSV already matches filesystem.")
+
+def monitor(base_dir, recursive=True):
+    database = FileStateDatabase(CSV_FILE)
+    reconcile_on_start(database)
+
+    handler = FileListEventHandler(database, WATCH_FILES)
+    observer = Observer()
+    observer.schedule(handler, base_dir, recursive=recursive)
+    observer.start()
+
+    print("Monitoring these files (state changes only):")
+    for f in WATCH_FILES:
+        print(" -", os.path.abspath(f))
+
     try:
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
-        obs.stop()
-    obs.join()
+        observer.stop()
+    observer.join()
 
 if __name__ == "__main__":
-    monitor("/tmp/test")  # <-- change base dir
+    parser = argparse.ArgumentParser(
+        description="Monitor state changes of a fixed file list; update CSV only on changes."
+    )
+    parser.add_argument("base_dir", help="Base directory to monitor (must cover all watched files)")
+    parser.add_argument("--no-recursive", action="store_true", help="Disable recursion into subdirectories")
+    args = parser.parse_args()
+
+    monitor(args.base_dir, recursive=not args.no_recursive)
