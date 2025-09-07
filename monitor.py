@@ -7,7 +7,6 @@ from watchdog.events import FileSystemEventHandler
 CSV_FILE = "file_event_counts.csv"
 FIELDS = ["path", "created", "deleted", "last_created", "last_deleted"]
 
-# 🔹 List of files you care about (absolute paths recommended)
 WATCH_FILES = [
     "/tmp/test/a.txt",
     "/tmp/test/b.log",
