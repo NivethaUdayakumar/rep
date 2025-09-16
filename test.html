@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>default ⧹ data (match by header names)</title>
+<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<style>
+  :root { --fg:#0f172a; --muted:#475569; --bg:#f8fafc; --card:#ffffff; --accent:#2563eb; }
+  html,body { margin:0; font:14px/1.45 system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; color:var(--fg); background:var(--bg);}
+  header{padding:16px 20px;background:var(--card);box-shadow:0 1px 0 rgba(2,8,23,.06);position:sticky;top:0;z-index:10}
+  h1{margin:0 0 6px;font-size:18px}
+  .hint{color:var(--muted);font-size:12px}
+  main{padding:20px;max-width:1100px;margin:auto}
+  .uploader{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:16px}
+  input[type="file"]{padding:8px;border:1px solid #e2e8f0;background:var(--card);border-radius:8px}
+  button{cursor:pointer;border:1px solid #e2e8f0;background:var(--card);border-radius:8px;padding:8px 12px}
+  button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+  button:disabled{opacity:.6;cursor:not-allowed}
+  .stat{display:inline-block;margin:6px 10px 0 0;padding:4px 8px;border-radius:999px;background:#eef2ff;color:#3730a3;font-size:12px}
+  .error{color:#b91c1c;background:#fef2f2;border:1px solid #fecaca;padding:10px 12px;border-radius:8px;margin:10px 0}
+  .hintbox{color:#334155;background:#f1f5f9;border:1px solid #e2e8f0;padding:10px 12px;border-radius:8px;margin:10px 0}
+  table{width:100%;border-collapse:separate;border-spacing:0;background:var(--card);border:1px solid #e2e8f0;border-radius:10px;overflow:hidden}
+  th,td{padding:8px 10px;border-bottom:1px solid #f1f5f9}
+  thead th{background:#f8fafc;text-align:left;font-weight:600;font-size:13px}
+  tbody tr:nth-child(odd) td{background:#fcfcff}
+  .empty{padding:20px;text-align:center;color:var(--muted);background:var(--card);border:1px dashed #cbd5e1;border-radius:10px}
+</style>
+</head>
+<body>
+<header>
+  <h1>Find rows in <code>default</code> NOT present in <code>data</code> (by 5 header names)</h1>
+  <div class="hint">Upload an Excel file with sheets <strong>data</strong> and <strong>default</strong>, or a CSV containing a column <code>sheet</code> with values <code>data</code>/<code>default</code>. Columns may be in any order; keys are the five headers present on <strong>default</strong>.</div>
+</header>
+
+<main>
+  <div class="uploader">
+    <input id="file" type="file" accept=".xlsx,.xls,.csv" />
+    <button id="process" class="primary" disabled>Process</button>
+    <button id="downloadHtml" disabled>Download Table (HTML)</button>
+    <span id="meta" class="stat" hidden></span>
+  </div>
+
+  <div id="messages"></div>
+  <div id="table-wrap"></div>
+</main>
+
+<script>
+(function(){
+  const $ = s => document.querySelector(s);
+  const fileInput = $('#file');
+  const btnProcess = $('#process');
+  const btnDownloadHtml = $('#downloadHtml');
+  const meta = $('#meta');
+  const msgs = $('#messages');
+  const tableWrap = $('#table-wrap');
+
+  let lastHeaders = [];
+  let lastRows = [];
+
+  fileInput.addEventListener('change', () => {
+    resetUI();
+    btnProcess.disabled = !fileInput.files.length;
+    meta.hidden = !fileInput.files.length;
+    if (fileInput.files.length) meta.textContent = `Selected: ${fileInput.files[0].name}`;
+  });
+
+  btnProcess.addEventListener('click', async () => {
+    resetUI();
+    if (!fileInput.files.length) return;
+    const file = fileInput.files[0];
+    try {
+      const buf = await file.arrayBuffer();
+      const ext = (file.name.split('.').pop() || '').toLowerCase();
+
+      // Read workbook/sheet
+      let dataAoA, defaultAoA;
+      if (ext === 'xlsx' || ext === 'xls') {
+        const wb = XLSX.read(buf, { type:'array' });
+        const sNames = wb.SheetNames;
+        const dataName = sNames.find(n => n.toLowerCase() === 'data');
+        const defaultName = sNames.find(n => n.toLowerCase() === 'default');
+        if (!dataName || !defaultName) throw new Error('Workbook must have sheets named "data" and "default".');
+
+        dataAoA = XLSX.utils.sheet_to_json(wb.Sheets[dataName], { header:1, raw:false, defval:'' });
+        defaultAoA = XLSX.utils.sheet_to_json(wb.Sheets[defaultName], { header:1, raw:false, defval:'' });
+      } else if (ext === 'csv') {
+        // CSV with a "sheet" column; split into two AoAs
+        const wb = XLSX.read(buf, { type:'array' });
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        const aoa = XLSX.utils.sheet_to_json(ws, { header:1, raw:false, defval:'' });
+        if (!aoa.length) throw new Error('CSV is empty.');
+        const hdr = aoa[0].map(s => String(s).trim());
+        const sheetIdx = hdr.findIndex(h => h.toLowerCase() === 'sheet');
+        if (sheetIdx === -1) throw new Error('CSV must include a "sheet" column with values "data" or "default".');
+
+        const rows = aoa.slice(1).map(r => normalizeRow(r, hdr.length));
+        const nonSheetCols = hdr.map((h,i)=>i).filter(i => i !== sheetIdx);
+        const mkAoA = (rowsFor) => {
+          const subHdr = nonSheetCols.map(i => hdr[i]);
+          const subRows = rowsFor.map(r => nonSheetCols.map(i => r[i]));
+          return [subHdr, ...subRows];
+        };
+        const dataRows = rows.filter(r => String(r[sheetIdx]).toLowerCase() === 'data');
+        const defRows  = rows.filter(r => String(r[sheetIdx]).toLowerCase() === 'default');
+        if (!dataRows.length || !defRows.length) throw new Error('CSV must include rows for both sheet=data and sheet=default.');
+        dataAoA = mkAoA(dataRows);
+        defaultAoA = mkAoA(defRows);
+      } else {
+        throw new Error('Unsupported file type. Please upload .xlsx, .xls, or .csv');
+      }
+
+      if (!dataAoA.length || !defaultAoA.length) throw new Error('One of the sheets is empty.');
+
+      // Headers
+      const dataHdr = dataAoA[0].map(x => String(x).trim());
+      const defHdr  = defaultAoA[0].map(x => String(x).trim());
+      if (defHdr.length < 5) throw new Error('The "default" sheet must have at least 5 columns.');
+      // Take EXACTLY the first five headers from "default" as the match-set
+      const defKeyHeaders = defHdr.slice(0,5);
+
+      // Validate that all defKeyHeaders exist in dataHdr
+      const missingInData = defKeyHeaders.filter(h => !dataHdr.includes(h));
+      if (missingInData.length) {
+        throw new Error(`These default headers are missing from data: ${missingInData.join(', ')}`);
+      }
+
+      // Build column index maps by header name
+      const idxMap = (hdr) => Object.fromEntries(hdr.map((h,i)=>[h,i]));
+      const dataIdx = idxMap(dataHdr);
+      const defIdx  = idxMap(defHdr);
+
+      const dataRows = dataAoA.slice(1).map(r => normalizeRow(r, dataHdr.length));
+      const defRows  = defaultAoA.slice(1).map(r => normalizeRow(r, defHdr.length));
+
+      // Key builder uses header names (order = defKeyHeaders)
+      const keyOf = (row, whichIdx) =>
+        JSON.stringify(defKeyHeaders.map(h => String(row[whichIdx[h]] ?? '').trim()));
+
+      // Put all data keys into a Set
+      const dataKeySet = new Set(dataRows.map(r => keyOf(r, dataIdx)));
+
+      // Missing = rows from default whose key not in data
+      const missing = defRows.filter(r => !dataKeySet.has(keyOf(r, defIdx)));
+
+      // Render table: show ONLY the default sheet columns (all default columns, not just the 5)
+      lastHeaders = defHdr;
+      lastRows = missing;
+
+      renderTable(lastHeaders, lastRows);
+      if (!missing.length) info('No differences found: every default key exists in data (by the five default headers).');
+      btnDownloadHtml.disabled = false;
+
+    } catch(e) {
+      error(e.message || String(e));
+    }
+  });
+
+  btnDownloadHtml.addEventListener('click', () => {
+    const table = tableWrap.querySelector('table');
+    if (!table) return;
+
+    // Minimal HTML doc containing only the table
+    const doc = [
+      '<!DOCTYPE html><html><head><meta charset="utf-8"><title>Missing (default \\ not in data)</title>',
+      '<style>',
+      'body{font:14px/1.5 system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; padding:16px;}',
+      'table{width:100%;border-collapse:separate;border-spacing:0;border:1px solid #e2e8f0;border-radius:10px;overflow:hidden}',
+      'th,td{padding:8px 10px;border-bottom:1px solid #f1f5f9}',
+      'thead th{background:#f8fafc;text-align:left;font-weight:600;font-size:13px}',
+      'tbody tr:nth-child(odd) td{background:#fcfcff}',
+      '</style></head><body>',
+      '<h3>Missing rows (default \\ not in data)</h3>',
+      table.outerHTML,
+      '</body></html>'
+    ].join('');
+
+    const blob = new Blob([doc], { type:'text/html;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const ts = new Date().toISOString().replace(/[:.]/g,'-');
+    a.href = url;
+    a.download = `missing_table_${ts}.html`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  });
+
+  // --- helpers ---
+  function normalizeRow(r, width) {
+    const out = Array.from({length: width}, (_,i) => (r[i] ?? ''));
+    return out;
+  }
+
+  function renderTable(headers, rows) {
+    tableWrap.innerHTML = '';
+    if (!rows.length) {
+      const div = document.createElement('div');
+      div.className = 'empty';
+      div.textContent = 'No rows to display.';
+      tableWrap.appendChild(div);
+      return;
+    }
+    const table = document.createElement('table');
+    const thead = document.createElement('thead');
+    const trh = document.createElement('tr');
+    headers.forEach(h => {
+      const th = document.createElement('th');
+      th.textContent = h;
+      trh.appendChild(th);
+    });
+    thead.appendChild(trh);
+    table.appendChild(thead);
+
+    const tbody = document.createElement('tbody');
+    rows.forEach(r => {
+      const tr = document.createElement('tr');
+      headers.forEach((h, i) => {
+        const td = document.createElement('td');
+        // r corresponds to default sheet row; keep default column order
+        td.textContent = (r[i] !== undefined && r[i] !== null) ? String(r[i]) : '';
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    tableWrap.appendChild(table);
+  }
+
+  function resetUI(){
+    msgs.innerHTML = '';
+    tableWrap.innerHTML = '';
+    lastHeaders = [];
+    lastRows = [];
+    btnDownloadHtml.disabled = true;
+  }
+
+  function error(msg){
+    const d=document.createElement('div');
+    d.className='error';
+    d.textContent=msg;
+    msgs.appendChild(d);
+  }
+  function info(msg){
+    const d=document.createElement('div');
+    d.className='hintbox';
+    d.textContent=msg;
+    msgs.appendChild(d);
+  }
+})();
+</script>
+</body>
+</html>
