@@ -1,0 +1,359 @@
+// multiDrilldown.defcol.js
+// Requires w2ui v2+ and your existing TableBuilder (no jQuery).
+// New API (example):
+// const mdd = new MultiDrilldown({
+//   container: '#grid',
+//   name: 'Main',
+//   csv: 'data/tracker.csv',
+//   groupByIdx: [0,1,2],        // 0-based
+//   statusIdx: [11],            // 0-based (array or single number)
+//   defColumn: {
+//     13: ['data/files/a0_a1_a2_a3_a4_a5_summary.csv',
+//          'data/files/a7_a8_b2_b3_b4_b5.csv',
+//          'data/files/a8_b1_b2_c3_c4_c5.csv'],
+//     14: ['data/html/chart.html'],
+//     15: ['data/files/a0_a1_a2_a3_a4_a5_summary.csv', 'data/html/chart.html'],
+//     6:  ['data/files/a0_a1_a2_a3_a4_a5_summary.csv', 'data/files/a7_a8_b2_b3_b4_b5.csv']
+//   },
+//   debug: true
+// });
+// mdd.init();
+
+import { TableBuilder } from './tableBuilder.js';
+
+export class MultiDrilldown {
+  constructor({
+    container = '#grid',
+    name = 'mainGrid',
+    csv,
+    groupByIdx = [],
+    statusIdx = null,       // can be number or [number]
+    colorColsIdx = [],
+    defColumn = {},         // { colIndex0: [patternLvl1, patternLvl2, ...], ... }
+    sep = '_',
+    debug = true
+  } = {}) {
+    if (!csv) throw new Error('csv (main CSV) is required');
+    Object.assign(this, {
+      container, name, csv, groupByIdx, statusIdx,
+      colorColsIdx, defColumn, sep, debug
+    });
+
+    // runtime state
+    this._openOnce = false;
+    this._stack = [];         // navigation stack
+    this._idx = -1;           // stack cursor
+    this._level0Fields = [];  // main grid fields
+    this._chains = null;      // current chain of patterns for the chosen column
+    this._contexts = [];      // row arrays per level: [a[], b[], c[], ...]
+    this._clickToken = 0;
+  }
+  log(...a){ if(this.debug) console.log('[MultiDrilldown]', ...a); }
+  warn(...a){ console.warn('[MultiDrilldown]', ...a); }
+
+  async init() {
+    if (!window.w2ui || !window.w2popup) {
+      this.warn('w2ui/w2popup not found; include w2ui v2 before this module.');
+      return;
+    }
+
+    // Build main grid via TableBuilder
+    const tb = new TableBuilder({
+      dataCsv: this.csv,
+      box: this.container,
+      name: this.name,
+      groupByIdx: this.groupByIdx ?? [],
+      statusIdx: Array.isArray(this.statusIdx) ? this.statusIdx[0] : this.statusIdx,
+      colorColsIdx: this.colorColsIdx ?? []
+    });
+    await tb.build();
+
+    const grid = w2ui[this.name];
+    if (!grid) { this.warn(`Grid "${this.name}" not found.`); return; }
+
+    // column fields cache (order-preserving)
+    this._level0Fields = grid.columns.map(c => c.field);
+
+    // main click => start chain if clicked column is in defColumn
+    grid.on('click', async (ev) => {
+      const col = ev.detail?.column ?? ev.column;
+      const recid = ev.detail?.recid ?? ev.recid;
+      if (col == null || recid == null) return;
+
+      const chain = this.defColumn[col];
+      if (!chain || chain.length === 0) return; // not selectable
+
+      const rec = grid.get(recid);
+      if (!rec) return;
+
+      // prepare contexts: a = main row
+      this._contexts = [ this.#rowToArray(grid, rec) ];
+      this._chains = chain.slice(); // clone
+
+      // open level 1 (chain[0])
+      const firstPath = await this.#fillPattern(this._chains[0], 0);
+      await this.#openAt({ levelIndex: 1, pathOrHtml: firstPath, label: this.#basename(firstPath) }, true);
+    });
+  }
+
+  /* ======================= Core open / render ======================= */
+  async #openAt(state, resetStack = false) {
+    // state: { levelIndex, pathOrHtml, label }
+    const title = this.#titleFor(state.levelIndex, state.label);
+    const crumbs = this.#crumbsFor();
+
+    // Open popup shell once
+    await this.#ensurePopup(title, crumbs);
+
+    // Render level: CSV vs HTML
+    if (this.#isHtml(state.pathOrHtml)) {
+      await this.#renderHtml(state.pathOrHtml);
+    } else {
+      await this.#renderCsv(state.levelIndex, state.pathOrHtml);
+    }
+
+    // Update stack
+    if (resetStack) { this._stack = []; this._idx = -1; }
+    this._stack.push(state);
+    this._idx = this._stack.length - 1;
+    this.#updateNavButtons();
+  }
+
+  async #renderCsv(levelIndex, csvPath) {
+    // Check file
+    if (!(await this.#exists(csvPath))) {
+      w2alert(`CSV not found:\n${csvPath}`);
+      return;
+    }
+
+    // Mount container
+    this.#replaceBody(`<div id="dd-grid" style="height:520px;"></div>`);
+    await this.#raf2();
+
+    // Destroy previous ddGrid
+    if (w2ui.ddGrid) try { w2ui.ddGrid.destroy(); } catch {}
+
+    // Build popup grid
+    const tb = new TableBuilder({
+      dataCsv: csvPath,
+      box: '#dd-grid',
+      name: 'ddGrid',
+      groupByIdx: [],
+      statusIdx: Array.isArray(this.statusIdx) ? this.statusIdx[0] : this.statusIdx
+    });
+    await tb.build();
+    try { w2ui.ddGrid?.resize(); } catch {}
+
+    // Wire click if there is a deeper pattern available
+    const nextLevel = this._contexts.length; // a=1st context => length is current depth
+    const nextPattern = this._chains?.[nextLevel]; // 0-based patterns list
+
+    if (!nextPattern) return; // no deeper level
+
+    const grid = w2ui.ddGrid;
+    grid.on('click', async (ev) => {
+      const token = ++this._clickToken;
+      const recid = ev.detail?.recid ?? ev.recid;
+      const rec = grid.get(recid);
+      if (!rec) return;
+
+      // push this level context (b/c/...)
+      this._contexts.push(this.#rowToArray(grid, rec));
+
+      // build next path
+      const filled = await this.#fillPattern(nextPattern, nextLevel); // nextLevel: b=1, c=2...
+      if (token !== this._clickToken) return;
+
+      await this.#openAt({ levelIndex: nextLevel + 1, pathOrHtml: filled, label: this.#basename(filled) });
+    });
+  }
+
+  async #renderHtml(htmlPath) {
+    // For safety and to run scripts/styles, use an iframe
+    const esc = this.#esc(htmlPath);
+    this.#replaceBody(`
+      <div style="height:100%;display:flex;flex-direction:column;">
+        <div style="font-size:12px;color:#666;margin:4px 0;">${this.#basename(esc)}</div>
+        <iframe src="${esc}" style="flex:1 1 auto;border:0;width:100%;height:100%;"></iframe>
+      </div>
+    `);
+  }
+
+  /* ======================= Pattern filling ======================= */
+  /**
+   * pattern grammar: tokens like a0, a1, ..., b0, b1, ..., c0, ...
+   *  - 'a' refers to main table row context (level 0)
+   *  - 'b' refers to level-1 popup row context
+   *  - 'c' refers to level-2 popup row context, etc.
+   *  - numbers are 0-based column indexes in that row
+   *
+   * examples:
+   *  'data/files/a0_a1_a2_a3_a4_a5_summary.csv'
+   *  'data/files/a7_a8_b2_b3_b4_b5.csv'
+   *  'data/files/a8_b1_b2_c3_c4_c5.csv'
+   */
+  async #fillPattern(pattern, depthIndex) {
+    // depthIndex is the level we're going to open next:
+    //   opening level-1 uses tokens a*, opening level-2 uses a* and b*, etc.
+    const rx = /([a-z])(\d+)/gi;
+    const allowed = 'abcdefghijklmnopqrstuvwxyz'; // supports deeper than c if you ever extend
+    const out = pattern.replace(rx, (_m, letterRaw, numRaw) => {
+      const letter = letterRaw.toLowerCase();
+      const which = allowed.indexOf(letter); // a=0, b=1, ...
+      const col = Number(numRaw);
+      const ctx = this._contexts[which]; // array for that level
+      const val = (ctx && col >= 0 && col < ctx.length) ? ctx[col] : '';
+      return this.#safePart(String(val ?? ''));
+    });
+    return out;
+  }
+
+  /* ======================= Popup shell & nav ======================= */
+  async #ensurePopup(title, crumbs) {
+    const shell = `
+      <div id="dd-wrap" style="padding:8px; display:flex; flex-direction:column; gap:8px; height:100%; box-sizing:border-box;">
+        <div id="dd-bar" style="display:flex; align-items:center; gap:8px; flex:0 0 auto;">
+          <button id="dd-back" class="w2ui-btn">◀ Back</button>
+          <button id="dd-fwd"  class="w2ui-btn">Forward ▶</button>
+          <div id="dd-crumbs" style="margin-left:8px; flex:1;"></div>
+        </div>
+        <div id="dd-body" style="flex:1 1 auto; min-height:400px; overflow:hidden;"></div>
+      </div>
+    `;
+    if (!this._openOnce) {
+      await new Promise(resolve => {
+        w2popup.open({
+          title,
+          body: shell,
+          modal: true,
+          showMax: true,
+          width: 980, height: 620,
+          onOpen(evt){ evt.onComplete = resolve; }
+        });
+      });
+      document.getElementById('dd-back')?.addEventListener('click', () => this.#go(-1));
+      document.getElementById('dd-fwd') ?.addEventListener('click', () => this.#go(+1));
+      this._openOnce = true;
+      w2popup.on('resize', () => {
+        const g = w2ui.ddGrid;
+        if (g && g.box && w2popup.body && w2popup.body.contains(g.box)) { try { g.resize(); } catch {} }
+      });
+    } else {
+      if (typeof w2popup?.title === 'function') w2popup.title(title);
+      else if (typeof w2popup?.setTitle === 'function') w2popup.setTitle(title);
+    }
+    this.#setCrumbs(crumbs);
+  }
+
+  #titleFor(levelIndex, tail='') {
+    const label = levelIndex <= 0 ? 'Main' : `Level ${levelIndex}`;
+    return tail ? `${label} — ${tail}` : label;
+  }
+
+  #crumbsFor() {
+    // a compact breadcrumb:
+    // Main  ›  chainName (from clicked column)  ›  current file basename
+    const out = [];
+    out.push({ label: 'Main', go: () => this.#closePopup() });
+    if (this._chains?.length) {
+      out.push({ label: `${this._chains.length}-level chain`, go: () => this.#popBackToLevel(1) });
+    }
+    if (this._stack.length > 0) {
+      const last = this._stack[this._stack.length - 1];
+      out.push({ label: this.#basename(last?.pathOrHtml || '') });
+    }
+    return out;
+  }
+
+  #setCrumbs(parts = []) {
+    const el = document.getElementById('dd-crumbs');
+    if (!el) return;
+    el.innerHTML = parts.map((p,i) => {
+      const last = i === parts.length - 1;
+      if (p.go && !last)
+        return `<a href="#" data-i="${i}" style="text-decoration:underline;">${this.#esc(p.label)}</a><span style="margin:0 6px;">›</span>`;
+      return `<span>${this.#esc(p.label)}</span>${last ? '' : '<span style="margin:0 6px;">›</span>'}`;
+    }).join('');
+    [...el.querySelectorAll('a[data-i]')].forEach(a => {
+      a.addEventListener('click', (e) => {
+        e.preventDefault();
+        const i = Number(a.getAttribute('data-i'));
+        if (i === 0) this.#closePopup(); else this.#popBackToLevel(1);
+      });
+    });
+    this.#updateNavButtons();
+  }
+
+  async #popBackToLevel(levelIndex) {
+    for (let i = this._idx; i >= 0; i--) {
+      if (this._stack[i].levelIndex === levelIndex) {
+        this._idx = i;
+        await this.#restoreAt(i);
+        return;
+      }
+    }
+  }
+
+  async #restoreAt(i) {
+    const st = this._stack[i];
+    if (!st) return;
+    const title = this.#titleFor(st.levelIndex, st.label);
+    const crumbs = this.#crumbsFor();
+    await this.#ensurePopup(title, crumbs);
+    if (this.#isHtml(st.pathOrHtml)) await this.#renderHtml(st.pathOrHtml);
+    else await this.#renderCsv(st.levelIndex, st.pathOrHtml);
+    this.#updateNavButtons();
+  }
+
+  async #go(delta) {
+    const ni = this._idx + delta;
+    if (ni < 0 || ni >= this._stack.length) return;
+    this._idx = ni;
+    await this.#restoreAt(this._idx);
+  }
+
+  #updateNavButtons() {
+    const back = document.getElementById('dd-back');
+    const fwd  = document.getElementById('dd-fwd');
+    if (back) back.disabled = !(this._idx > 0);
+    if (fwd)  fwd.disabled  = !(this._idx >= 0 && this._idx < this._stack.length - 1);
+  }
+
+  #replaceBody(html) {
+    const body = document.getElementById('dd-body');
+    if (!body) return;
+    body.innerHTML = html;
+  }
+
+  #closePopup() {
+    try { w2popup.close(); } catch {}
+    this._openOnce = false;
+    this._stack = [];
+    this._idx = -1;
+    this._chains = null;
+    this._contexts = [];
+    if (w2ui.ddGrid) try { w2ui.ddGrid.destroy(); } catch {}
+  }
+
+  /* ======================= Helpers ======================= */
+  #rowToArray(grid, rec) {
+    const fields = grid.columns.map(c => c.field);
+    return fields.map(f => rec[f]);
+  }
+
+  #isHtml(p){ return /\.html?(\?|#|$)/i.test(String(p)); }
+  async #exists(url) {
+    try {
+      const h = await fetch(url, { method:'HEAD' }); if (h.ok) return true;
+      const g = await fetch(url, { method:'GET'  }); return g.ok;
+    } catch { return false; }
+  }
+
+  #basename(p){ return (String(p).split('/').pop() || String(p)); }
+  #esc(s){ return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+  #safePart(s){
+    const banned = new RegExp(`[^\\w\\-]+`, 'g');
+    return String(s ?? '').replace(banned,'_').replace(/^_+|_+$/g,'');
+  }
+  async #raf2(){ await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))); }
+}
