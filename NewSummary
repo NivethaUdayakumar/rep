@@ -1,0 +1,118 @@
+// server.js — zero-dep static server + JSON read/write endpoints for promote
+const http = require('http');
+const fs   = require('fs');
+const fsp  = fs.promises;
+const path = require('path');
+
+const PORT = 8000;
+const ROOT = __dirname;
+const PUB  = path.join(ROOT, 'public');
+const DATA = path.join(ROOT, 'data');
+const SUMMARY = path.join(DATA, 'summary.json');
+
+const MIME = {
+  '.html': 'text/html; charset=utf-8',
+  '.js':   'application/javascript; charset=utf-8',
+  '.css':  'text/css; charset=utf-8',
+  '.csv':  'text/csv; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.svg':  'image/svg+xml',
+  '.png':  'image/png',
+  '.ico':  'image/x-icon',
+};
+
+function safeServe(absRoot, relReqPath, res) {
+  const abs = path.join(absRoot, relReqPath);
+  if (!abs.startsWith(absRoot)) { res.writeHead(403); res.end('Forbidden'); return; }
+  fs.stat(abs, (err, st) => {
+    if (err || !st.isFile()) { res.writeHead(404); res.end('Not found'); return; }
+    const ext = path.extname(abs).toLowerCase();
+    res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream' });
+    fs.createReadStream(abs).pipe(res);
+  });
+}
+
+async function readBody(req) {
+  const chunks = [];
+  for await (const ch of req) chunks.push(ch);
+  const raw = Buffer.concat(chunks).toString('utf8');
+  return raw;
+}
+
+async function ensureSummary() {
+  try {
+    await fsp.mkdir(DATA, { recursive: true });
+    await fsp.access(SUMMARY, fs.constants.F_OK);
+  } catch {
+    await fsp.writeFile(SUMMARY, JSON.stringify({}, null, 2), 'utf8');
+  }
+}
+
+async function readSummaryJSON() {
+  await ensureSummary();
+  const txt = await fsp.readFile(SUMMARY, 'utf8');
+  try { return JSON.parse(txt || '{}'); }
+  catch { return {}; }
+}
+
+async function writeSummaryJSON(obj) {
+  await ensureSummary();
+  const tmp = SUMMARY + '.tmp';
+  await fsp.writeFile(tmp, JSON.stringify(obj, null, 2), 'utf8');
+  await fsp.rename(tmp, SUMMARY);
+}
+
+http.createServer(async (req, res) => {
+  try {
+    const urlPath = decodeURIComponent(req.url.split('?')[0]);
+
+    // API: read summary
+    if (req.method === 'GET' && urlPath === '/api/summary') {
+      const data = await readSummaryJSON();
+      res.writeHead(200, { 'Content-Type': MIME['.json'] });
+      res.end(JSON.stringify(data));
+      return;
+    }
+
+    // API: promote (upsert)
+    if (req.method === 'POST' && urlPath === '/api/promote') {
+      const raw = await readBody(req);
+      let payload = {};
+      try { payload = JSON.parse(raw || '{}'); } catch {}
+      const key = String(payload.key ?? '').trim();
+      const data = payload.data ?? {};
+      if (!key) { res.writeHead(400); res.end('Missing key'); return; }
+
+      const summary = await readSummaryJSON();
+      summary[key] = data; // upsert
+      await writeSummaryJSON(summary);
+
+      res.writeHead(200, { 'Content-Type': MIME['.json'] });
+      res.end(JSON.stringify({ ok: true, key }));
+      return;
+    }
+
+    // Serve root
+    if (urlPath === '/' || urlPath === '/index.html') {
+      safeServe(PUB, 'index.html', res);
+      return;
+    }
+
+    // Serve data files from /data/*
+    if (urlPath.startsWith('/data/')) {
+      const rel = urlPath.slice('/data/'.length);
+      safeServe(DATA, rel, res);
+      return;
+    }
+
+    // Otherwise serve from /public/*
+    const rel = urlPath.replace(/^\//, '');
+    safeServe(PUB, rel, res);
+  } catch (err) {
+    console.error(err);
+    res.writeHead(500);
+    res.end('Internal Server Error');
+  }
+}).listen(PORT, () => {
+  console.log(`Serving http://localhost:${PORT}`);
+});
