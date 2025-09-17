@@ -1,281 +1,461 @@
-// multiDrilldown.js
-// New API (drop-in): see example usage in your prompt.
-// - Double LEFT click = drilldown
-// - Double RIGHT click = copy cell text to clipboard
-// - defColumn: { colIdx: [ level1Pattern, level2Pattern, ... ] }
-//   Tokens in patterns: a0,a1,...  (main row cols), b0,b1,... (level-1 row), c0,c1,... etc.
-//   Example: './data/files/a0_a1_a2_a3_a4_a5_summary.csv'
-// - If a pattern ends with '.html' it is fetched and injected into the popup.
-// - Reuses a single popup with breadcrumbs.
+// multiDrilldown.js (NEW API only)
+// Features:
+// - Tokenized drilldown (a*/b*/c*/...)
+// - Breadcrumbs + Back/Forward
+// - HTML or CSV steps
+// - Promote button (main table only) -> POST /api/promote (updates data/summary.json)
+// - Right-click on any cell (main + popup) copies cell text to clipboard with a small toast
 
 import { TableBuilder } from './tableBuilder.js';
 
 export class MultiDrilldown {
-  /**
-   * @param {Object} opts
-   * @param {string} opts.container  - CSS selector where main grid is rendered
-   * @param {string} opts.name       - Display name for main grid
-   * @param {string} opts.csv        - Path to main CSV
-   * @param {number[]} [opts.groupByIdx=[]] - 0-based indices for grouping (passed to TableBuilder)
-   * @param {number[]} [opts.statusIdx=[]]  - 0-based indices to color by status
-   * @param {number[]|null} [opts.promoteIdx=null] - 0-based indices where a 'promote' button can appear (handled in TableBuilder)
-   * @param {number[]|null} [opts.promoteCheck=null] - 0-based indices to join for key (TableBuilder uses it)
-   * @param {number[]|null} [opts.promoteData=null]  - 0-based indices to save (TableBuilder uses it)
-   * @param {Object} [opts.defColumn={}] - map colIdx -> [patternLevel1, patternLevel2, ...]
-   * @param {string} [opts.sep='_']      - not used by formatter (kept for compat)
-   * @param {boolean} [opts.debug=false]
-   */
   constructor({
-    container,
-    name,
+    container = '#grid',
+    name = 'mainGrid',
     csv,
     groupByIdx = [],
-    statusIdx = [],
-    promoteIdx = null,
-    promoteCheck = null,
-    promoteData = null,
-    defColumn = {},
+    statusIdx = null,
+    colorColsIdx = [],
+    defColumn = {},          // { 0basedColIndex: [patternL1, patternL2, ...] }
+    promoteIdx = null,       // number (main grid only)
+    promoteCheck = [],       // [colIdx,...] build key from these; "_" joined if >1
+    promoteData = [],        // [colIdx,...] store header->value into summary.json
     sep = '_',
-    debug = false,
-  }) {
-    Object.assign(this, {
-      container, name, csv, groupByIdx, statusIdx,
-      promoteIdx, promoteCheck, promoteData, defColumn, sep, debug
-    });
+    debug = true
+  } = {}) {
+    if (!csv) throw new Error('csv (main table) is required');
+    this.container = container;
+    this.name = name;
+    this.csv = csv;
+    this.groupByIdx = groupByIdx;
+    this.statusIdx = Array.isArray(statusIdx) ? statusIdx : (statusIdx == null ? [] : [statusIdx]);
+    this.colorColsIdx = colorColsIdx;
+    this.defColumn = defColumn;
+    this.sep = sep;
+    this.debug = debug;
 
-    this._popup = null;
-    this._crumbs = [];     // [{label, action}] stack to render
-    this._trailRows = [];  // per-level selected row arrays: [mainRow, bRow, cRow, ...]
-    this._patterns = null; // active patterns array for the column that initiated the drilldown
+    // Promote config (main table only)
+    this.promoteIdx = Number.isInteger(promoteIdx) ? promoteIdx : null;
+    this.promoteCheck = Array.isArray(promoteCheck) ? promoteCheck : [];
+    this.promoteData  = Array.isArray(promoteData)  ? promoteData  : [];
+
+    // runtime
+    this._openOnce = false;
+    this._stack = [];   // [{ step, patterns, contexts, title }]
+    this._idx = -1;
+    this._level0Fields = [];
   }
 
+  /* ======================= PUBLIC ======================= */
   async init() {
-    // Render the main table
+    if (!window.w2ui || !window.w2popup) {
+      this.warn('w2ui/w2popup not found; include w2ui before this module.');
+      return;
+    }
+
+    // Build main grid
     const tb = new TableBuilder({
       dataCsv: this.csv,
       box: this.container,
       name: this.name,
       groupByIdx: this.groupByIdx,
-      statusIdx: this.statusIdx,
-      promoteIdx: this.promoteIdx,
-      promoteCheck: this.promoteCheck,
-      promoteData: this.promoteData,
-      debug: this.debug,
-      onCellDblClick: (ev, payload) => this.#onCellDblClickMain(payload),
-      onCellRightDblClick: (ev, payload) => this.#copyToClipboard(payload.value),
+      statusIdx: this.statusIdx.length ? this.statusIdx[0] : null,
+      colorColsIdx: this.colorColsIdx
     });
     await tb.build();
-  }
 
-  // ========== Drilldown handlers ==========
+    const grid = w2ui[this.name];
+    if (!grid) { this.warn(`Grid "${this.name}" not found.`); return; }
 
-  #onCellDblClickMain({ col, rowArr, headers }) {
-    if (!(col in this.defColumn)) return;
-    this._patterns = this.defColumn[col]; // array for this column
-    if (!Array.isArray(this._patterns) || this._patterns.length === 0) return;
+    // cache fields (visual order)
+    this._level0Fields = grid.columns.map(c => c.field);
 
-    // Reset stacks
-    this._trailRows = [rowArr];
-    this._openPopup();
+    // Right-click copy on MAIN grid
+    this._enableRightClickCopy(this.name);
 
-    // Level 1 from 'a*' tokens
-    const level = 0; // 'a'
-    const resolved = this.#resolvePattern(this._patterns[level], this._trailRows);
-    this.#pushCrumb(this.name, () => {
-      // back to level 0 -> show resolved again
-      this._trailRows = [rowArr];
-      this.#renderResolved(resolved, level);
-    });
-    this.#renderResolved(resolved, level);
-  }
-
-  // When inside popup, any cell double-click should try to go deeper if a next pattern exists
-  #onCellDblClickPopup(level, headers, rowArr) {
-    const nextLevel = level + 1;
-    if (!this._patterns || nextLevel >= this._patterns.length) return;
-
-    // Track the row for token substitution (b*, c*, ...)
-    this._trailRows[nextLevel] = rowArr;
-
-    const resolved = this.#resolvePattern(this._patterns[nextLevel], this._trailRows);
-    this.#pushCrumb(`Level ${nextLevel}`, () => {
-      // Re-render that specific level
-      this.#renderResolved(resolved, nextLevel);
-    });
-    this.#renderResolved(resolved, nextLevel);
-  }
-
-  // ========== Popup & breadcrumbs ==========
-
-  _openPopup() {
-    if (this._popup) {
-      this._popup.style.display = 'block';
-      this.#renderCrumbs();
-      return;
+    // Promote button in MAIN grid
+    if (Number.isInteger(this.promoteIdx) &&
+        this.promoteIdx >= 0 && this.promoteIdx < grid.columns.length) {
+      this._setupPromoteOnMainGrid(grid);
     }
-    const wrap = document.createElement('div');
-    wrap.id = 'mdd-popup';
-    Object.assign(wrap.style, {
-      position: 'fixed', inset: '4%', background: '#fff', border: '1px solid #ccc',
-      borderRadius: '12px', zIndex: 99999, display: 'flex', flexDirection: 'column',
-      boxShadow: '0 10px 30px rgba(0,0,0,0.25)', overflow: 'hidden'
-    });
 
-    const header = document.createElement('div');
-    header.id = 'mdd-popup-header';
-    Object.assign(header.style, {
-      padding: '10px 14px', borderBottom: '1px solid #eee',
-      display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap'
-    });
+    // Drilldown from MAIN grid
+    grid.on('click', async (ev) => {
+      const col = ev.detail?.column ?? ev.column;
+      const recid = ev.detail?.recid ?? ev.recid;
+      if (col == null || recid == null) return;
 
-    const closeBtn = document.createElement('button');
-    closeBtn.textContent = '×';
-    Object.assign(closeBtn.style, {
-      marginLeft: 'auto', fontSize: '18px', lineHeight: '18px',
-      padding: '4px 8px', cursor: 'pointer'
-    });
-    closeBtn.addEventListener('click', () => {
-      wrap.style.display = 'none';
-      this._crumbs = [];
-    });
-
-    const crumbBar = document.createElement('div');
-    crumbBar.id = 'mdd-crumbs';
-    crumbBar.style.display = 'flex';
-    crumbBar.style.flexWrap = 'wrap';
-    crumbBar.style.gap = '6px';
-
-    header.appendChild(crumbBar);
-    header.appendChild(closeBtn);
-
-    const body = document.createElement('div');
-    body.id = 'mdd-popup-content';
-    Object.assign(body.style, { flex: '1 1 auto', overflow: 'auto' });
-
-    wrap.appendChild(header);
-    wrap.appendChild(body);
-    document.body.appendChild(wrap);
-
-    this._popup = wrap;
-    this.#renderCrumbs();
-  }
-
-  #renderCrumbs() {
-    const bar = this._popup.querySelector('#mdd-crumbs');
-    bar.innerHTML = '';
-    if (this._crumbs.length === 0) {
-      const base = document.createElement('span');
-      base.textContent = this.name;
-      bar.appendChild(base);
-      return;
-    }
-    this._crumbs.forEach((c, i) => {
-      const a = document.createElement('a');
-      a.href = '#';
-      a.textContent = c.label;
-      a.style.textDecoration = 'none';
-      a.style.padding = '2px 6px';
-      a.style.borderRadius = '6px';
-      a.style.background = i === this._crumbs.length - 1 ? '#eef' : '#f5f5f5';
-      a.addEventListener('click', (e) => {
-        e.preventDefault();
-        // Trim crumbs to clicked
-        this._crumbs = this._crumbs.slice(0, i + 1);
-        c.action?.();
-        this.#renderCrumbs();
-      });
-      if (i > 0) {
-        const sep = document.createElement('span');
-        sep.textContent = '›';
-        sep.style.opacity = '0.6';
-        sep.style.padding = '0 2px';
-        bar.appendChild(sep);
+      // If promote column and user clicked the button => handle promote only
+      if (Number.isInteger(this.promoteIdx) && col === this.promoteIdx) {
+        const oe = ev.detail?.originalEvent || ev.originalEvent;
+        const target = oe?.target || window.event?.target;
+        if (target && target.closest && target.closest('.btn-promote')) {
+          await this._handlePromoteClick(grid, recid);
+          return;
+        }
       }
-      bar.appendChild(a);
+
+      const patterns = this.defColumn[col];
+      if (!patterns || !patterns.length) return;
+
+      const rec = grid.get(recid);
+      if (!rec) return;
+
+      const mainCtx = this._valuesFromRecord(rec, this._level0Fields);
+      const title = grid.columns[col]?.text || grid.columns[col]?.caption || `Col ${col}`;
+      await this._openSequence({ patterns, contexts: [mainCtx], title });
     });
   }
 
-  #pushCrumb(label, action) {
-    // Avoid adding duplicates back-to-back
-    if (this._crumbs.length === 0 || this._crumbs[this._crumbs.length - 1].label !== label) {
-      this._crumbs.push({ label, action });
-    }
-    this.#renderCrumbs();
+  /* ======================= PROMOTE (main table only) ======================= */
+  _setupPromoteOnMainGrid(grid) {
+    const col = grid.columns[this.promoteIdx];
+
+    // interpret truthy "yes"
+    const yesMatcher = (v) => {
+      const s = String(v ?? '').trim().toLowerCase();
+      return s === 'yes' || s === 'y' || s === 'true' || s === '1';
+    };
+
+    const originalRender = col.render;
+    col.render = (rec) => {
+      const field = col.field;
+      const val = field ? rec[field] : '';
+      if (!yesMatcher(val)) return '';
+      // preserve custom render if needed, but show button instead for clarity
+      void originalRender; // not used now
+      return `<button class="w2ui-btn btn-promote" data-recid="${rec.recid}" title="Promote this row">promote</button>`;
+    };
+
+    try { grid.refresh(); } catch {}
   }
 
-  // ========== Loading & rendering resolved resource ==========
+  async _handlePromoteClick(grid, recid) {
+    const rec = grid.get(recid);
+    if (!rec) return;
 
-  async #renderResolved(resolvedPath, level) {
-    const host = this._popup.querySelector('#mdd-popup-content');
+    const fields = grid.columns.map(c => c.field);
+    const getVal = (idx) => rec[fields[idx]];
+    const keyParts = this.promoteCheck.map(getVal).map(v => String(v ?? '').trim());
+    const key = (keyParts.length <= 1) ? (keyParts[0] ?? '') : keyParts.join('_');
+
+    const data = {};
+    for (const idx of this.promoteData) {
+      const header = grid.columns[idx]?.text || grid.columns[idx]?.caption || fields[idx] || `c${idx}`;
+      data[header] = rec[fields[idx]];
+    }
+    data.updatedAt = new Date().toISOString();
+
+    try {
+      const rsp = await fetch('/api/promote', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key, data })
+      });
+      if (!rsp.ok) throw new Error(`HTTP ${rsp.status}`);
+      this._toast(grid.box, 'Promoted');
+    } catch (e) {
+      console.error('Promote failed:', e);
+      this._toast(grid.box, 'Promote failed');
+    }
+  }
+
+  /* ======================= SEQUENCE NAV ======================= */
+  async _openSequence({ patterns, contexts, title }) {
+    await this._ensurePopup(title, this._crumbsFor({ step: 0, patterns, contexts }));
+    await this._renderStep({ step: 0, patterns, contexts, title }, false);
+    this._stack = [{ step: 0, patterns, contexts, title }];
+    this._idx = 0;
+    this._updateNavButtons();
+  }
+
+  async _advance({ current, rowCtx }) {
+    const nextStep = current.step + 1;
+    if (nextStep >= current.patterns.length) return;
+    const nextContexts = [...current.contexts, rowCtx];
+    const nextState = { step: nextStep, patterns: current.patterns, contexts: nextContexts, title: current.title };
+
+    await this._renderStep(nextState, true);
+    this._stack = this._stack.slice(0, this._idx + 1);
+    this._stack.push(nextState);
+    this._idx = this._stack.length - 1;
+    this._updateNavButtons();
+  }
+
+  async _go(delta) {
+    const ni = this._idx + delta;
+    if (ni < 0 || ni >= this._stack.length) return;
+    this._idx = ni;
+    const st = this._stack[this._idx];
+    await this._ensurePopup(st.title, this._crumbsFor(st));
+    await this._renderStep(st, false, false); // rewire clicks after back/forward
+    this._updateNavButtons();
+  }
+
+  /* ======================= RENDER ONE STEP ======================= */
+  async _renderStep(state, replaceForward = false, noWire = false) {
+    const { step, patterns, contexts } = state;
+    const url = this._resolvePattern(patterns[step], contexts);
+
+    this._replaceBody(`<div id="dd-body-inner" style="height:100%;"></div>`);
+
+    if (url.toLowerCase().endsWith('.html')) {
+      if (!(await this._exists(url))) return this._missing(url);
+      const body = document.getElementById('dd-body-inner');
+      body.innerHTML = `
+        <div style="height:100%;display:flex;flex-direction:column;">
+          <div style="flex:1 1 auto;min-height:420px;">
+            <iframe src="${this._esc(url)}" title="preview" style="border:0;width:100%;height:100%;"></iframe>
+          </div>
+        </div>`;
+      this._setCrumbs(this._crumbsFor(state, url));
+      return;
+    }
+
+    if (!(await this._exists(url))) return this._missing(url);
+
+    const innerId = 'dd-grid';
+    document.getElementById('dd-body-inner').innerHTML = `<div id="${innerId}" style="height:520px;"></div>`;
+    await this._raf2();
+
+    if (w2ui.ddGrid) try { w2ui.ddGrid.destroy(); } catch {}
+    const tb = new TableBuilder({ dataCsv: url, box: `#${innerId}`, name: 'ddGrid' });
+    await tb.build();
+    try { w2ui.ddGrid?.resize(); } catch {}
+
+    // Right-click copy on POPUP grid
+    this._enableRightClickCopy('ddGrid');
+
+    if (!noWire && step + 1 < patterns.length) {
+      const grid = w2ui.ddGrid;
+      grid.on('click', async (ev) => {
+        const recid = ev.detail?.recid ?? ev.recid;
+        const rec = grid.get(recid);
+        if (!rec) return;
+        const fields = grid.columns.map(c => c.field);
+        const rowCtx = this._valuesFromRecord(rec, fields);
+        await this._advance({ current: state, rowCtx });
+      });
+    }
+
+    this._setCrumbs(this._crumbsFor(state, url));
+  }
+
+  /* ======================= TOKEN RESOLUTION ======================= */
+  _resolvePattern(pattern, contexts) {
+    const mapLetterToIndex = (ch) => ch.toLowerCase().charCodeAt(0) - 97; // 'a'->0
+    const safePart = (s) =>
+      String(s ?? '').replace(/[^\w\-]+/g, '_').replace(/^_+|_+$/g, '');
+    return pattern.replace(/([a-zA-Z])(\d+)/g, (_, letter, idxStr) => {
+      const ctxIndex = mapLetterToIndex(letter);
+      const row = contexts[ctxIndex] || [];
+      return safePart(row[Number(idxStr)]);
+    });
+  }
+
+  /* ======================= POPUP SHELL + CRUMBS ======================= */
+  async _ensurePopup(title, crumbs) {
+    const shell = `
+      <div id="dd-wrap" style="padding:8px; display:flex; flex-direction:column; gap:8px; height:100%; box-sizing:border-box;">
+        <div id="dd-bar" style="display:flex; align-items:center; gap:8px; flex:0 0 auto;">
+          <button id="dd-back" class="w2ui-btn">◀ Back</button>
+          <button id="dd-fwd"  class="w2ui-btn">Forward ▶</button>
+          <div id="dd-crumbs" style="margin-left:8px; flex:1;"></div>
+        </div>
+        <div id="dd-body" style="flex:1 1 auto; min-height:400px; overflow:hidden;"></div>
+      </div>`;
+    if (!this._openOnce) {
+      await new Promise(resolve => {
+        w2popup.open({
+          title, body: shell, modal: true, showMax: true, width: 980, height: 620,
+          onOpen(evt){ evt.onComplete = resolve; }
+        });
+      });
+      document.getElementById('dd-back')?.addEventListener('click', () => this._go(-1));
+      document.getElementById('dd-fwd') ?.addEventListener('click', () => this._go(+1));
+      this._openOnce = true;
+      w2popup.on?.('resize', () => {
+        const g = w2ui.ddGrid;
+        if (g && g.box && w2popup.body && w2popup.body.contains(g.box)) { try { g.resize(); } catch {} }
+      });
+    } else {
+      w2popup.title?.(title);
+    }
+    this._setCrumbs(crumbs);
+  }
+
+  _crumbsFor(state, url = '') {
+    const parts = [];
+    parts.push({ label: 'Main', go: () => this._closePopup() });
+    if (state?.step >= 0) {
+      const ctx0 = state.contexts?.[0] ?? [];
+      const compact = this._safeJoin([ctx0[0], ctx0[1], ctx0[2]].filter(Boolean)).slice(0, 48);
+      if (compact) parts.push({ label: compact, go: () => this._popBackToStep(0) });
+      if (url) parts.push({ label: this._basename(url) });
+    }
+    return parts;
+  }
+
+  async _popBackToStep(step) {
+    for (let i = this._idx; i >= 0; i--) {
+      if (this._stack[i].step === step) {
+        this._idx = i;
+        const st = this._stack[i];
+        await this._ensurePopup(st.title, this._crumbsFor(st));
+        await this._renderStep(st, false, false); // rewire clicks on restored step
+        this._updateNavButtons();
+        return;
+      }
+    }
+  }
+
+  setCrumbs(...args) { return this._setCrumbs(...args); }
+  _setCrumbs(items = []) {
+    const host = document.getElementById('dd-crumbs');
+    if (!host) return;
     host.innerHTML = '';
 
-    const isHtml = /\.html?(\?|#|$)/i.test(resolvedPath);
-    const isCsv  = /\.csv(\?|#|$)/i.test(resolvedPath);
-
-    if (this.debug) console.log('[MultiDrilldown] resolved:', resolvedPath, { level });
-
-    if (isHtml) {
-      try {
-        const resp = await fetch(resolvedPath, { cache: 'no-store' });
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        const html = await resp.text();
-        host.innerHTML = html;
-      } catch (e) {
-        host.innerHTML = `<div style="padding:12px;color:#b00;">Failed to load HTML: ${resolvedPath}<br>${e}</div>`;
+    items.forEach((it, idx) => {
+      const isLink = typeof it.go === 'function';
+      const node = document.createElement(isLink ? 'a' : 'span');
+      node.textContent = String(it.label ?? '');
+      node.style.marginRight = '6px';
+      if (isLink) {
+        node.href = 'javascript:void(0)';
+        node.style.textDecoration = 'underline';
+        node.addEventListener('click', (e) => { e.preventDefault(); it.go(); });
+      } else {
+        node.style.opacity = 0.85;
       }
-      return;
-    }
+      host.appendChild(node);
 
-    if (isCsv) {
-      const innerBox = document.createElement('div');
-      const innerId = `mdd-grid-l${level}-${Date.now()}`;
-      innerBox.id = innerId;
-      host.appendChild(innerBox);
-
-      const tb = new TableBuilder({
-        dataCsv: resolvedPath,
-        box: `#${innerId}`,
-        name: `Level ${level}`,
-        groupByIdx: [],           // popup tables: no grouping by default
-        statusIdx: this.statusIdx,
-        debug: this.debug,
-        onCellDblClick: (ev, payload) => {
-          // record clicked row for token substitutions at this level
-          this.#onCellDblClickPopup(level, payload.headers, payload.rowArr);
-        },
-        onCellRightDblClick: (ev, payload) => this.#copyToClipboard(payload.value),
-      });
-      await tb.build();
-      return;
-    }
-
-    host.innerHTML = `<div style="padding:12px;color:#b00;">Unknown resource type: ${resolvedPath}</div>`;
-  }
-
-  // ========== Token formatter ==========
-
-  /**
-   * Replace tokens like a0,a1,... b0,b1,... c0,c1,... using rows per level.
-   * rowsByLevel[0] -> 'a*', rowsByLevel[1] -> 'b*', etc.
-   */
-  #resolvePattern(pattern, rowsByLevel) {
-    return pattern.replace(/([a-z])(\d+)/ig, (_m, letter, idxStr) => {
-      const level = letter.toLowerCase().charCodeAt(0) - 'a'.charCodeAt(0);
-      const colIdx = parseInt(idxStr, 10) || 0;
-      const row = rowsByLevel[level];
-      if (!row || colIdx < 0 || colIdx >= row.length) return '';
-      return String(row[colIdx]).replaceAll('/', '_').replaceAll('\\', '_').trim();
+      if (idx < items.length - 1) {
+        const sep = document.createElement('span');
+        sep.textContent = '›';
+        sep.style.margin = '0 6px';
+        sep.style.opacity = 0.6;
+        host.appendChild(sep);
+      }
     });
   }
 
-  // ========== Utilities ==========
+  /* ======================= Right-click copy ======================= */
+  _enableRightClickCopy(gridName) {
+    const grid = w2ui[gridName];
+    if (!grid || !grid.box) return;
+    if (grid._rc_copy_bound) return;  // avoid double-binding
+    grid._rc_copy_bound = true;
 
-  async #copyToClipboard(text) {
-    try {
-      await navigator.clipboard.writeText(String(text ?? ''));
-      if (this.debug) console.log('[MultiDrilldown] copied:', text);
-    } catch (e) {
-      if (this.debug) console.warn('Clipboard failed:', e);
-    }
+    grid.box.addEventListener('contextmenu', async (e) => {
+      const td = e.target.closest('td.w2ui-grid-data');
+      if (!td) return;
+      e.preventDefault();
+
+      const col = Number(td.getAttribute('col'));
+      if (Number.isNaN(col)) return;
+
+      const tr = td.parentElement;
+      let recid = tr?.getAttribute('recid');
+      if (!recid && tr?.id) {
+        const m = tr.id.match(/_rec_(.*)$/);
+        if (m) recid = m[1];
+      }
+      if (recid == null) return;
+
+      const rec = grid.get(recid);
+      if (!rec) return;
+
+      const field = grid.columns[col]?.field;
+      const value = (field != null) ? rec[field] : '';
+      const text = String(value ?? '');
+
+      try {
+        await navigator.clipboard.writeText(text);
+        this._toast(grid.box, 'Copied');
+      } catch {
+        // fallback: select & execCommand
+        const sel = window.getSelection();
+        const range = document.createRange();
+        range.selectNodeContents(td);
+        sel.removeAllRanges();
+        sel.addRange(range);
+        try { document.execCommand('copy'); this._toast(grid.box, 'Copied'); }
+        catch { this._toast(grid.box, 'Copy failed'); }
+        sel.removeAllRanges();
+      }
+    }, { passive: false });
   }
+
+  _toast(containerEl, msg = 'Copied') {
+    const host = document.createElement('div');
+    host.textContent = msg;
+    Object.assign(host.style, {
+      position: 'absolute',
+      right: '12px',
+      bottom: '12px',
+      padding: '6px 10px',
+      background: 'rgba(0,0,0,0.7)',
+      color: '#fff',
+      borderRadius: '6px',
+      fontSize: '12px',
+      zIndex: 99999,
+      pointerEvents: 'none',
+      transition: 'opacity .2s',
+      opacity: '0'
+    });
+    const parent = containerEl.closest('.w2ui-grid') || containerEl;
+    const prevPos = parent.style.position;
+    if (!prevPos) parent.style.position = 'relative';
+    parent.appendChild(host);
+    requestAnimationFrame(() => { host.style.opacity = '1'; });
+    setTimeout(() => {
+      host.style.opacity = '0';
+      setTimeout(() => {
+        try { parent.removeChild(host); } catch {}
+        if (!prevPos) parent.style.position = '';
+      }, 200);
+    }, 900);
+  }
+
+  /* ======================= Utils ======================= */
+  _replaceBody(html) {
+    const body = document.getElementById('dd-body');
+    if (!body) return;
+    body.innerHTML = html;
+  }
+
+  _closePopup() {
+    try { w2popup.close(); } catch {}
+    this._openOnce = false;
+    this._stack = [];
+    this._idx = -1;
+    if (w2ui.ddGrid) try { w2ui.ddGrid.destroy(); } catch {}
+  }
+
+  _updateNavButtons() {
+    const back = document.getElementById('dd-back');
+    const fwd  = document.getElementById('dd-fwd');
+    if (back) back.disabled = !(this._idx > 0);
+    if (fwd)  fwd.disabled  = !(this._idx >= 0 && this._idx < this._stack.length - 1);
+  }
+
+  _valuesFromRecord(rec, fields) { return fields.map(f => rec[f]); }
+  async _raf2(){ await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))); }
+
+  async _exists(url) {
+    try {
+      const h = await fetch(url, { method:'HEAD' });
+      if (h.ok) return true;
+      const g = await fetch(url, { method:'GET' });
+      return g.ok;
+    } catch { return false; }
+  }
+
+  _missing(url) { w2alert(`File not found:\n${url}`); }
+  _basename(p){ return (p.split('/').pop() || p); }
+  _esc(s){ return String(s ?? '').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+  _safeJoin(arr){ return arr.map(v => String(v ?? '').replace(/[^\w\-]+/g,'_')).join(this.sep); }
+
+  log(...a){ if(this.debug) console.log('[MultiDrilldown]', ...a); }
+  warn(...a){ console.warn('[MultiDrilldown]', ...a); }
 }

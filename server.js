@@ -1,0 +1,130 @@
+// server.js — zero-dep static server + promote API
+const http = require('http');
+const fs   = require('fs');
+const fsp  = fs.promises;
+const path = require('path');
+
+const PORT = 8000;
+const PUB  = path.join(__dirname, 'public');
+const DATA = path.join(__dirname, 'data');
+const SUMMARY = path.join(DATA, 'summary.json');
+
+const MIME = {
+  '.html': 'text/html; charset=utf-8',
+  '.js':   'application/javascript; charset=utf-8',
+  '.css':  'text/css; charset=utf-8',
+  '.csv':  'text/csv; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.svg':  'image/svg+xml',
+  '.png':  'image/png',
+  '.ico':  'image/x-icon',
+};
+
+function safeServe(absRoot, relReqPath, res) {
+  const abs = path.join(absRoot, relReqPath);
+  if (!abs.startsWith(absRoot)) { res.writeHead(403); res.end('Forbidden'); return; }
+  fs.stat(abs, (err, st) => {
+    if (err || !st.isFile()) { res.writeHead(404); res.end('Not found'); return; }
+    const ext = path.extname(abs).toLowerCase();
+    res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream' });
+    fs.createReadStream(abs).pipe(res);
+  });
+}
+
+async function readBody(req) {
+  return new Promise((resolve, reject) => {
+    let chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      const buf = Buffer.concat(chunks);
+      const txt = buf.toString('utf8') || '';
+      resolve(txt);
+    });
+    req.on('error', reject);
+  });
+}
+
+async function loadSummaryObj() {
+  try {
+    const txt = await fsp.readFile(SUMMARY, 'utf8');
+    const obj = JSON.parse(txt);
+    if (obj && typeof obj === 'object') return obj;
+    return {};
+  } catch (e) {
+    // create folder if missing
+    try { await fsp.mkdir(DATA, { recursive: true }); } catch {}
+    return {};
+  }
+}
+
+async function saveSummaryObj(obj) {
+  const txt = JSON.stringify(obj, null, 2);
+  await fsp.mkdir(DATA, { recursive: true });
+  await fsp.writeFile(SUMMARY, txt, 'utf8');
+}
+
+http.createServer(async (req, res) => {
+  const urlPath = decodeURIComponent(req.url.split('?')[0]);
+
+  // CORS (optional; helps when testing from different origins or fetches)
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
+
+  // API: read summary
+  if (urlPath === '/api/summary' && req.method === 'GET') {
+    try {
+      const obj = await loadSummaryObj();
+      res.writeHead(200, { 'Content-Type': MIME['.json'] });
+      res.end(JSON.stringify(obj));
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('Failed to read summary.json');
+    }
+    return;
+  }
+
+  // API: promote -> upsert {key: data}
+  if (urlPath === '/api/promote' && req.method === 'POST') {
+    try {
+      const bodyTxt = await readBody(req);
+      const payload = JSON.parse(bodyTxt || '{}');
+      const key = String(payload.key ?? '').trim();
+      const data = payload.data && typeof payload.data === 'object' ? payload.data : null;
+      if (!key || !data) {
+        res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end('Missing key or data');
+        return;
+      }
+      const obj = await loadSummaryObj();
+      obj[key] = { ...(obj[key] || {}), ...data };  // upsert/merge
+      await saveSummaryObj(obj);
+      res.writeHead(200, { 'Content-Type': MIME['.json'] });
+      res.end(JSON.stringify({ ok: true, key }));
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('Failed to update summary.json');
+    }
+    return;
+  }
+
+  // Home
+  if (urlPath === '/' || urlPath === '/index.html') {
+    safeServe(PUB, 'index.html', res);
+    return;
+  }
+
+  // Serve /data/*
+  if (urlPath.startsWith('/data/')) {
+    const rel = urlPath.slice('/data/'.length);
+    safeServe(DATA, rel, res);
+    return;
+  }
+
+  // Otherwise /public/*
+  const rel = urlPath.replace(/^\//, '');
+  safeServe(PUB, rel, res);
+}).listen(PORT, () => {
+  console.log(`Serving http://localhost:${PORT}`);
+});
