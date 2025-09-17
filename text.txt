@@ -1,0 +1,270 @@
+// multiDrilldown.js (NEW API only)
+//
+// Usage:
+// const mdd = new MultiDrilldown({
+//   container: '#grid',
+//   name: 'Main',
+//   csv: 'data/tracker.csv',
+//   groupByIdx: [],          // 0-based
+//   statusIdx: [11],         // 0-based (single or array)
+//   defColumn: {
+//     13: [
+//       './data/files/a0_a1_a2_a3_a4_a5_summary.csv',
+//       './data/files/a7_a8_b2_b3_b4_b5.csv',
+//       './data/files/a8_b1_b2_c3_c4_c5.csv'
+//     ],
+//     14: ['./data/html/chart.html'],
+//     15: ['./data/files/a0_a1_a2_a3_a4_a5_summary.csv', './data/html/chart.html'],
+//     6:  ['./data/files/a0_a1_a2_a3_a4_a5_summary.csv', './data/files/a7_a8_b2_b3_b4_b5.csv']
+//   },
+//   debug: true
+// });
+// mdd.init();
+
+import { TableBuilder } from './tableBuilder.js';
+
+export class MultiDrilldown {
+  constructor({
+    container = '#grid',
+    name = 'mainGrid',
+    csv,
+    groupByIdx = [],
+    statusIdx = null,
+    colorColsIdx = [],
+    defColumn = {},
+    sep = '_',
+    debug = true
+  } = {}) {
+    if (!csv) throw new Error('csv (main table) is required');
+    this.container = container;
+    this.name = name;
+    this.csv = csv;
+    this.groupByIdx = groupByIdx;
+    this.statusIdx = Array.isArray(statusIdx) ? statusIdx : (statusIdx == null ? [] : [statusIdx]);
+    this.colorColsIdx = colorColsIdx;
+    this.defColumn = defColumn;
+    this.sep = sep;
+    this.debug = debug;
+
+    this._openOnce = false;
+    this._stack = [];
+    this._idx = -1;
+    this._level0Fields = [];
+    this._clickGuard = 0;
+  }
+
+  async init() {
+    if (!window.w2ui || !window.w2popup) {
+      this.warn('w2ui/w2popup not found; include w2ui before this module.');
+      return;
+    }
+
+    const tb = new TableBuilder({
+      dataCsv: this.csv,
+      box: this.container,
+      name: this.name,
+      groupByIdx: this.groupByIdx,
+      statusIdx: this.statusIdx.length ? this.statusIdx[0] : null,
+      colorColsIdx: this.colorColsIdx
+    });
+    await tb.build();
+
+    const grid = w2ui[this.name];
+    if (!grid) { this.warn(`Grid "${this.name}" not found.`); return; }
+    this._level0Fields = grid.columns.map(c => c.field);
+
+    grid.on('click', async (ev) => {
+      const col = ev.detail?.column ?? ev.column;
+      const recid = ev.detail?.recid ?? ev.recid;
+      if (col == null || recid == null) return;
+
+      const patterns = this.defColumn[col];
+      if (!patterns || !patterns.length) return;
+
+      const rec = grid.get(recid);
+      if (!rec) return;
+
+      const mainCtx = this._valuesFromRecord(rec, this._level0Fields);
+      const title = grid.columns[col]?.text || grid.columns[col]?.caption || `Col ${col}`;
+      await this._openSequence({ patterns, contexts: [mainCtx], title });
+    });
+  }
+
+  async _openSequence({ patterns, contexts, title }) {
+    await this._ensurePopup(title, this._crumbsFor({ step: 0, patterns, contexts }));
+    await this._renderStep({ step: 0, patterns, contexts, title }, false);
+    this._stack = [{ step: 0, patterns, contexts, title }];
+    this._idx = 0;
+    this._updateNavButtons();
+  }
+
+  async _advance({ current, rowCtx }) {
+    const nextStep = current.step + 1;
+    if (nextStep >= current.patterns.length) return;
+    const nextContexts = [...current.contexts, rowCtx];
+    const nextState = { step: nextStep, patterns: current.patterns, contexts: nextContexts, title: current.title };
+
+    await this._renderStep(nextState, true);
+    this._stack = this._stack.slice(0, this._idx + 1);
+    this._stack.push(nextState);
+    this._idx = this._stack.length - 1;
+    this._updateNavButtons();
+  }
+
+  async _go(delta) {
+    const ni = this._idx + delta;
+    if (ni < 0 || ni >= this._stack.length) return;
+    this._idx = ni;
+    const st = this._stack[this._idx];
+    await this._ensurePopup(st.title, this._crumbsFor(st));
+    await this._renderStep(st, false, true);
+    this._updateNavButtons();
+  }
+
+  async _renderStep(state, replaceForward = false, noWire = false) {
+    const { step, patterns, contexts } = state;
+    const url = this._resolvePattern(patterns[step], contexts);
+
+    this._replaceBody(`<div id="dd-body-inner" style="height:100%;"></div>`);
+
+    if (url.toLowerCase().endsWith('.html')) {
+      if (!(await this._exists(url))) return this._missing(url);
+      document.getElementById('dd-body-inner').innerHTML =
+        `<iframe src="${this._esc(url)}" style="border:0;width:100%;height:100%;"></iframe>`;
+      return;
+    }
+
+    if (!(await this._exists(url))) return this._missing(url);
+
+    document.getElementById('dd-body-inner').innerHTML = `<div id="dd-grid" style="height:520px;"></div>`;
+    await this._raf2();
+    if (w2ui.ddGrid) try { w2ui.ddGrid.destroy(); } catch {}
+    const tb = new TableBuilder({ dataCsv: url, box: '#dd-grid', name: 'ddGrid' });
+    await tb.build();
+    try { w2ui.ddGrid?.resize(); } catch {}
+
+    if (!noWire && step + 1 < patterns.length) {
+      const grid = w2ui.ddGrid;
+      grid.on('click', async (ev) => {
+        const recid = ev.detail?.recid ?? ev.recid;
+        const rec = grid.get(recid);
+        if (!rec) return;
+        const fields = grid.columns.map(c => c.field);
+        const rowCtx = this._valuesFromRecord(rec, fields);
+        await this._advance({ current: state, rowCtx });
+      });
+    }
+
+    this._setCrumbs(this._crumbsFor(state, url));
+  }
+
+  _resolvePattern(pattern, contexts) {
+    const mapLetterToIndex = (ch) => ch.toLowerCase().charCodeAt(0) - 97;
+    const safePart = (s) => String(s ?? '').replace(/[^\w\-]+/g, '_').replace(/^_+|_+$/g, '');
+    return pattern.replace(/([a-zA-Z])(\d+)/g, (_, letter, idxStr) => {
+      const ctxIndex = mapLetterToIndex(letter);
+      const row = contexts[ctxIndex] || [];
+      return safePart(row[Number(idxStr)]);
+    });
+  }
+
+  async _ensurePopup(title, crumbs) {
+    const shell = `
+      <div id="dd-wrap" style="padding:8px;display:flex;flex-direction:column;height:100%;">
+        <div id="dd-bar" style="display:flex;align-items:center;gap:8px;flex:0 0 auto;">
+          <button id="dd-back" class="w2ui-btn">◀ Back</button>
+          <button id="dd-fwd"  class="w2ui-btn">Forward ▶</button>
+          <div id="dd-crumbs" style="margin-left:8px;flex:1;"></div>
+        </div>
+        <div id="dd-body" style="flex:1 1 auto;overflow:hidden;"></div>
+      </div>`;
+    if (!this._openOnce) {
+      await new Promise(resolve => {
+        w2popup.open({ title, body: shell, modal: true, showMax: true, width: 980, height: 620,
+          onOpen(evt){ evt.onComplete = resolve; } });
+      });
+      document.getElementById('dd-back')?.addEventListener('click', () => this._go(-1));
+      document.getElementById('dd-fwd') ?.addEventListener('click', () => this._go(+1));
+      this._openOnce = true;
+    } else {
+      w2popup.title?.(title);
+    }
+    this._setCrumbs(crumbs);
+  }
+
+  _crumbsFor(state, url = '') {
+    const parts = [];
+    parts.push({ label: 'Main', go: () => this._closePopup() });
+    if (state?.step >= 0) {
+      const ctx0 = state.contexts?.[0] ?? [];
+      const compact = this._safeJoin(ctx0.slice(0, 3).filter(Boolean)).slice(0, 48);
+      if (compact) parts.push({ label: compact, go: () => this._popBackToStep(0) });
+      if (url) parts.push({ label: this._basename(url) });
+    }
+    return parts;
+  }
+
+  async _popBackToStep(step) {
+    for (let i = this._idx; i >= 0; i--) {
+      if (this._stack[i].step === step) {
+        this._idx = i;
+        const st = this._stack[i];
+        await this._ensurePopup(st.title, this._crumbsFor(st));
+        await this._renderStep(st, false, true);
+        this._updateNavButtons();
+        return;
+      }
+    }
+  }
+
+  _setCrumbs(items = []) {
+    const host = document.getElementById('dd-crumbs');
+    if (!host) return;
+    host.innerHTML = '';
+    items.forEach((it, idx) => {
+      const node = document.createElement(it.go ? 'a' : 'span');
+      node.textContent = String(it.label ?? '');
+      if (it.go) {
+        node.href = 'javascript:void(0)';
+        node.style.textDecoration = 'underline';
+        node.addEventListener('click', e => { e.preventDefault(); it.go(); });
+      }
+      host.appendChild(node);
+      if (idx < items.length - 1) {
+        const sep = document.createElement('span');
+        sep.textContent = '›';
+        sep.style.margin = '0 6px';
+        host.appendChild(sep);
+      }
+    });
+  }
+
+  _replaceBody(html) {
+    const body = document.getElementById('dd-body');
+    if (body) body.innerHTML = html;
+  }
+
+  _closePopup() {
+    try { w2popup.close(); } catch {}
+    this._openOnce = false;
+    this._stack = [];
+    this._idx = -1;
+    if (w2ui.ddGrid) try { w2ui.ddGrid.destroy(); } catch {}
+  }
+
+  _updateNavButtons() {
+    document.getElementById('dd-back').disabled = !(this._idx > 0);
+    document.getElementById('dd-fwd').disabled  = !(this._idx >= 0 && this._idx < this._stack.length - 1);
+  }
+
+  _valuesFromRecord(rec, fields) { return fields.map(f => rec[f]); }
+  async _raf2(){ await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))); }
+  async _exists(url){ try{ return (await fetch(url,{method:'HEAD'})).ok; }catch{ return false; } }
+  _missing(url){ w2alert(`File not found:\n${url}`); }
+  _basename(p){ return (p.split('/').pop() || p); }
+  _esc(s){ return String(s ?? '').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+  _safeJoin(arr){ return arr.map(v=>String(v??'').replace(/[^\w\-]+/g,'_')).join(this.sep); }
+
+  log(...a){ if(this.debug) console.log('[MultiDrilldown]',...a); }
+  warn(...a){ console.warn('[MultiDrilldown]',...a); }
+}
