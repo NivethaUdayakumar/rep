@@ -2,3 +2,6 @@ const keyOf = (row, whichIdx) =>
   JSON.stringify(defKeyHeaders.map((h, i) =>
     i === 1 ? null : String(row[whichIdx[h]] ?? '').trim()
   ));
+
+# befor missing
+const filteredDefRows = defRows.filter(r => String(r[2]).trim() !== '');
