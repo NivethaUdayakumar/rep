@@ -1,0 +1,215 @@
+// router.js (CommonJS, no Express)
+// Run: node router.js
+// Then open your index.html (or wherever MultiDrilldown is used)
+
+const http = require('http');
+const fs = require('fs');
+const fsp = fs.promises;
+const path = require('path');
+const url = require('url');
+
+const HOST = '0.0.0.0';
+const PORT = 3000;
+
+const ROOT = process.cwd();
+const DATA_DIR = path.join(ROOT, 'data');
+const SUMMARY_PATH = path.join(DATA_DIR, 'summary.json');
+
+const MIME = {
+  '.html': 'text/html; charset=UTF-8',
+  '.htm':  'text/html; charset=UTF-8',
+  '.js':   'application/javascript; charset=UTF-8',
+  '.mjs':  'application/javascript; charset=UTF-8',
+  '.css':  'text/css; charset=UTF-8',
+  '.csv':  'text/csv; charset=UTF-8',
+  '.json': 'application/json; charset=UTF-8',
+  '.png':  'image/png',
+  '.jpg':  'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif':  'image/gif',
+  '.svg':  'image/svg+xml',
+  '.ico':  'image/x-icon',
+  '.txt':  'text/plain; charset=UTF-8'
+};
+
+function setCORS(res) {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,HEAD,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+}
+
+async function ensureSummaryFile() {
+  try {
+    await fsp.mkdir(DATA_DIR, { recursive: true });
+    await fsp.access(SUMMARY_PATH, fs.constants.F_OK);
+  } catch {
+    await fsp.writeFile(SUMMARY_PATH, JSON.stringify({}, null, 2), 'utf8');
+  }
+}
+
+async function readJSONSafe(fp) {
+  try {
+    const s = await fsp.readFile(fp, 'utf8');
+    return s.trim() ? JSON.parse(s) : {};
+  } catch {
+    return {};
+  }
+}
+
+async function writeJSONAtomic(fp, obj) {
+  const tmp = fp + '.tmp';
+  await fsp.writeFile(tmp, JSON.stringify(obj, null, 2), 'utf8');
+  await fsp.rename(tmp, fp);
+}
+
+async function handleSummary(req, res, q) {
+  await ensureSummaryFile();
+
+  if (req.method === 'GET') {
+    const db = await readJSONSafe(SUMMARY_PATH);
+    if (q.key) {
+      if (Object.prototype.hasOwnProperty.call(db, q.key)) {
+        const out = { key: q.key, data: db[q.key] };
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(out));
+      } else {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Not found' }));
+      }
+    } else {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(db));
+    }
+    return true;
+  }
+
+  if (req.method === 'POST') {
+    try {
+      const body = await getBodyJSON(req);
+      if (!body || typeof body.key !== 'string' || typeof body.data !== 'object' || body.data === null) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Invalid payload. Expect { key: string, data: object }' }));
+        return true;
+      }
+
+      const db = await readJSONSafe(SUMMARY_PATH);
+      db[body.key] = body.data; // upsert
+      await writeJSONAtomic(SUMMARY_PATH, db);
+
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true }));
+    } catch (err) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: String(err) }));
+    }
+    return true;
+  }
+
+  // Method not allowed
+  res.writeHead(405, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ error: 'Method not allowed' }));
+  return true;
+}
+
+function safeJoin(base, target) {
+  const p = path.normalize(path.join(base, target));
+  if (!p.startsWith(base)) return base; // prevent path traversal
+  return p;
+}
+
+async function serveStatic(req, res, pathname) {
+  let filePath = safeJoin(ROOT, pathname);
+  let stat;
+  try {
+    stat = await fsp.stat(filePath);
+  } catch {
+    // Try index.html for directories
+    const alt = safeJoin(filePath, 'index.html');
+    try {
+      stat = await fsp.stat(alt);
+      filePath = alt;
+    } catch {
+      res.writeHead(404, { 'Content-Type': 'text/plain; charset=UTF-8' });
+      res.end('Not found');
+      return;
+    }
+  }
+
+  if (stat.isDirectory()) {
+    const alt = path.join(filePath, 'index.html');
+    try {
+      await fsp.access(alt);
+      filePath = alt;
+    } catch {
+      res.writeHead(403, { 'Content-Type': 'text/plain; charset=UTF-8' });
+      res.end('Directory listing disabled');
+      return;
+    }
+  }
+
+  const ext = path.extname(filePath).toLowerCase();
+  const type = MIME[ext] || 'application/octet-stream';
+  if (req.method === 'HEAD') {
+    res.writeHead(200, { 'Content-Type': type });
+    res.end();
+    return;
+  }
+
+  try {
+    const stream = fs.createReadStream(filePath);
+    res.writeHead(200, { 'Content-Type': type });
+    stream.pipe(res);
+  } catch {
+    res.writeHead(500, { 'Content-Type': 'text/plain; charset=UTF-8' });
+    res.end('Error reading file');
+  }
+}
+
+function getBodyJSON(req) {
+  return new Promise((resolve, reject) => {
+    let data = '';
+    req.on('data', (d) => {
+      data += d;
+      if (data.length > 10 * 1024 * 1024) { // 10MB guard
+        req.destroy();
+        reject(new Error('Body too large'));
+      }
+    });
+    req.on('end', () => {
+      try {
+        resolve(data ? JSON.parse(data) : {});
+      } catch (e) {
+        reject(e);
+      }
+    });
+    req.on('error', reject);
+  });
+}
+
+const server = http.createServer(async (req, res) => {
+  try {
+    setCORS(res);
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204); res.end(); return;
+    }
+
+    const parsed = url.parse(req.url, true);
+    const pathname = parsed.pathname || '/';
+
+    if (pathname === '/api/summary') {
+      await handleSummary(req, res, parsed.query);
+      return;
+    }
+
+    // Static
+    await serveStatic(req, res, pathname);
+  } catch (err) {
+    console.error(err);
+    res.writeHead(500, { 'Content-Type': 'text/plain; charset=UTF-8' });
+    res.end('Internal Server Error');
+  }
+});
+
+server.listen(PORT, HOST, () => {
+  console.log(`Server running at http://${HOST}:${PORT}/`);
+});
