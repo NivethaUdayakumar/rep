@@ -1,0 +1,12 @@
+// server.js
+const http = require('http');
+const path = require('path');
+const { handleRequest } = require('./router');
+
+const PORT = 8000;
+
+http.createServer(async (req, res) => {
+  await handleRequest(req, res);
+}).listen(PORT, () => {
+  console.log(`Serving http://localhost:${PORT}`);
+});
