@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>default ⧹ data (by header names, sortable, auto-process)</title>
+<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<style>
+  :root { --fg:#0f172a; --muted:#475569; --bg:#f8fafc; --card:#fff; --accent:#2563eb; }
+  html,body{margin:0;font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;color:var(--fg);background:var(--bg)}
+  header{padding:16px 20px;background:var(--card);box-shadow:0 1px 0 rgba(2,8,23,.06);position:sticky;top:0;z-index:10}
+  h1{margin:0 0 6px;font-size:18px}
+  .hint{color:var(--muted);font-size:12px}
+  main{padding:20px;max-width:1100px;margin:auto}
+  .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:10px 0}
+  input[type="file"],button{padding:8px 12px;border:1px solid #e2e8f0;background:var(--card);border-radius:8px}
+  button{cursor:pointer}
+  button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+  button:disabled{opacity:.6;cursor:not-allowed}
+  .stat{display:inline-block;margin-left:6px;padding:4px 8px;border-radius:999px;background:#eef2ff;color:#3730a3;font-size:12px}
+  .error{color:#b91c1c;background:#fef2f2;border:1px solid #fecaca;padding:10px 12px;border-radius:8px;margin:10px 0}
+  .hintbox{color:#334155;background:#f1f5f9;border:1px solid #e2e8f0;padding:10px 12px;border-radius:8px;margin:10px 0}
+  table{width:100%;border-collapse:separate;border-spacing:0;background:var(--card);border:1px solid #e2e8f0;border-radius:10px;overflow:hidden}
+  th,td{padding:8px 10px;border-bottom:1px solid #f1f5f9}
+  thead th{background:#f8fafc;text-align:left;font-weight:600;font-size:13px}
+  tbody tr:nth-child(odd) td{background:#fcfcff}
+  .empty{padding:20px;text-align:center;color:var(--muted);background:var(--card);border:1px dashed #cbd5e1;border-radius:10px}
+</style>
+</head>
+<body>
+<header>
+  <h1>Find rows in <code>default</code> NOT present in <code>data</code></h1>
+  <div class="hint">Match by the first five header names from <b>default</b> (any column order). Ignore the 2nd column during matching. Exclude rows where the 3rd column is blank.</div>
+</header>
+
+<main>
+  <div class="row">
+    <input id="file" type="file" accept=".xlsx,.xls,.csv" />
+    <button id="downloadHtml" disabled>Download Table (HTML)</button>
+    <span id="meta" class="stat" hidden></span>
+  </div>
+
+  <!-- Sort controls -->
+  <div id="sort-controls" class="row" style="margin-top:0;">
+    <button id="addSortLevel">+ Add sort level</button>
+    <button id="applySort" class="primary">Apply sort</button>
+    <button id="clearSort">Clear</button>
+    <span class="hint">Sorting applies to the on-page table and the downloaded HTML.</span>
+  </div>
+  <div id="sort-levels" style="display:flex;flex-direction:column;gap:6px;margin:6px 0;"></div>
+
+  <div id="messages"></div>
+  <div id="table-wrap"></div>
+</main>
+
+<script>
+(function(){
+  const $ = s => document.querySelector(s);
+  const fileInput = $('#file');
+  const btnDownloadHtml = $('#downloadHtml');
+  const meta = $('#meta');
+  const msgs = $('#messages');
+  const tableWrap = $('#table-wrap');
+
+  let lastHeaders = [];
+  let lastRows = [];
+  let sortLevels = []; // [{col:'Header', dir:'asc'|'desc'}]
+
+  // ---------- Auto-process on file selection ----------
+  fileInput.addEventListener('change', async () => {
+    resetUI();
+    const hasFile = !!fileInput.files.length;
+    meta.hidden = !hasFile;
+    if (!hasFile) return;
+    meta.textContent = `Selected: ${fileInput.files[0].name}`;
+    await processFile(fileInput.files[0]); // auto-process immediately
+  });
+
+  async function processFile(file){
+    try {
+      const buf = await file.arrayBuffer();
+      const ext = (file.name.split('.').pop() || '').toLowerCase();
+
+      let dataAoA, defaultAoA;
+      if (ext === 'xlsx' || ext === 'xls') {
+        const wb = XLSX.read(buf, { type:'array' });
+        const dataName = wb.SheetNames.find(n => n.toLowerCase() === 'data');
+        const defaultName = wb.SheetNames.find(n => n.toLowerCase() === 'default');
+        if (!dataName || !defaultName) throw new Error('Workbook must have sheets named "data" and "default".');
+        dataAoA = XLSX.utils.sheet_to_json(wb.Sheets[dataName], { header:1, raw:false, defval:'' });
+        defaultAoA = XLSX.utils.sheet_to_json(wb.Sheets[defaultName], { header:1, raw:false, defval:'' });
+      } else if (ext === 'csv') {
+        const wb = XLSX.read(buf, { type:'array' });
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        const aoa = XLSX.utils.sheet_to_json(ws, { header:1, raw:false, defval:'' });
+        if (!aoa.length) throw new Error('CSV is empty.');
+        const hdr = aoa[0].map(s => String(s).trim());
+        const sheetIdx = hdr.findIndex(h => h.toLowerCase() === 'sheet');
+        if (sheetIdx === -1) throw new Error('CSV must include a "sheet" column with values "data" or "default".');
+
+        const rows = aoa.slice(1).map(r => normalizeRow(r, hdr.length));
+        const nonSheetCols = hdr.map((_,i)=>i).filter(i => i !== sheetIdx);
+        const mkAoA = rowsFor => {
+          const subHdr = nonSheetCols.map(i => hdr[i]);
+          const subRows = rowsFor.map(r => nonSheetCols.map(i => r[i]));
+          return [subHdr, ...subRows];
+        };
+        const dataRows = rows.filter(r => String(r[sheetIdx]).toLowerCase() === 'data');
+        const defRows  = rows.filter(r => String(r[sheetIdx]).toLowerCase() === 'default');
+        if (!dataRows.length || !defRows.length) throw new Error('CSV needs rows for both sheet=data and sheet=default.');
+        dataAoA = mkAoA(dataRows);
+        defaultAoA = mkAoA(defRows);
+      } else {
+        throw new Error('Unsupported file type. Upload .xlsx, .xls, or .csv');
+      }
+
+      if (!dataAoA.length || !defaultAoA.length) throw new Error('One of the sheets is empty.');
+
+      const dataHdr = dataAoA[0].map(x => String(x).trim());
+      const defHdr  = defaultAoA[0].map(x => String(x).trim());
+      if (defHdr.length < 5) throw new Error('"default" must have at least 5 columns.');
+
+      // Match set = first five header names from default (order fixed)
+      const defKeyHeaders = defHdr.slice(0,5);
+
+      // Ensure each default key header exists in data
+      const missingInData = defKeyHeaders.filter(h => !dataHdr.includes(h));
+      if (missingInData.length) throw new Error(`These default headers are missing in data: ${missingInData.join(', ')}`);
+
+      const idxMap = hdr => Object.fromEntries(hdr.map((h,i)=>[h,i]));
+      const dataIdx = idxMap(dataHdr);
+      const defIdx  = idxMap(defHdr);
+
+      const dataRows = dataAoA.slice(1).map(r => normalizeRow(r, dataHdr.length));
+      const defRows  = defaultAoA.slice(1).map(r => normalizeRow(r, defHdr.length));
+
+      // Key builder: ignore the 2nd column (index 1) of the five-key set
+      const keyOf = (row, whichIdx) =>
+        JSON.stringify(defKeyHeaders.map((h,i) => i === 1 ? null : String(row[whichIdx[h]] ?? '').trim()));
+
+      // Exclude rows where the 3rd column (index 2) of the five-key set is blank
+      const filteredDefRows = defRows.filter(r => {
+        const col3Header = defKeyHeaders[2];
+        const val = String(r[defIdx[col3Header]] ?? '').trim();
+        return val !== '';
+      });
+
+      const dataKeySet = new Set(dataRows.map(r => keyOf(r, dataIdx)));
+      const missing = filteredDefRows.filter(r => !dataKeySet.has(keyOf(r, defIdx)));
+
+      // Show full default row (all default columns)
+      lastHeaders = defHdr;
+      lastRows = missing;
+
+      initSortUI(lastHeaders);
+      renderTable(lastHeaders, multiSort(lastRows, lastHeaders, sortLevels));
+      if (!missing.length) info('No differences found (by five default headers with rules applied).');
+      btnDownloadHtml.disabled = false;
+
+    } catch(e) { error(e.message || String(e)); }
+  }
+
+  // ---------- Sort UI ----------
+  function initSortUI(headers){
+    sortLevels = [];
+    renderSortLevels(headers);
+  }
+  function renderSortLevels(headers){
+    const wrap = $('#sort-levels');
+    wrap.innerHTML = '';
+    sortLevels.forEach((lvl, idx) => {
+      const row = document.createElement('div');
+      row.style.display = 'flex'; row.style.gap = '8px'; row.style.alignItems = 'center';
+
+      const sel = document.createElement('select');
+      headers.forEach(h => {
+        const opt = document.createElement('option'); opt.value = h; opt.textContent = h;
+        if (h === lvl.col) opt.selected = true;
+        sel.appendChild(opt);
+      });
+      sel.onchange = () => { lvl.col = sel.value; };
+
+      const dir = document.createElement('select');
+      ['asc','desc'].forEach(d => {
+        const opt = document.createElement('option'); opt.value = d; opt.textContent = d.toUpperCase();
+        if (d === lvl.dir) opt.selected = true;
+        dir.appendChild(opt);
+      });
+      dir.onchange = () => { lvl.dir = dir.value; };
+
+      const del = document.createElement('button'); del.textContent = '✕'; del.title = 'Remove level';
+      del.onclick = () => { sortLevels.splice(idx,1); renderSortLevels(headers); renderTable(headers, multiSort(lastRows, headers, sortLevels)); };
+
+      row.appendChild(document.createTextNode(`Level ${idx+1}:`));
+      row.appendChild(sel); row.appendChild(dir); row.appendChild(del);
+      wrap.appendChild(row);
+    });
+  }
+  $('#addSortLevel').addEventListener('click', ()=>{
+    if (!lastHeaders.length) return;
+    sortLevels.push({ col: lastHeaders[0], dir: 'asc' });
+    renderSortLevels(lastHeaders);
+  });
+  $('#applySort').addEventListener('click', ()=>{
+    if (!lastHeaders.length) return;
+    renderTable(lastHeaders, multiSort(lastRows, lastHeaders, sortLevels));
+  });
+  $('#clearSort').addEventListener('click', ()=>{
+    sortLevels = [];
+    renderSortLevels(lastHeaders);
+    renderTable(lastHeaders, lastRows);
+  });
+
+  function multiSort(rows, headers, levels){
+    if (!levels.length) return rows.slice();
+    const idx = Object.fromEntries(headers.map((h,i)=>[h,i]));
+    const arr = rows.slice();
+    arr.sort((a,b)=>{
+      for (const {col,dir} of levels){
+        const i = idx[col];
+        const av = String(a[i] ?? '').trim();
+        const bv = String(b[i] ?? '').trim();
+        const cmp = av.localeCompare(bv, undefined, {numeric:true, sensitivity:'base'});
+        if (cmp !== 0) return dir === 'desc' ? -cmp : cmp;
+      }
+      return 0;
+    });
+    return arr;
+  }
+
+  // ---------- Download current table as standalone HTML ----------
+  btnDownloadHtml.addEventListener('click', () => {
+    const table = tableWrap.querySelector('table');
+    if (!table) return;
+    const doc = [
+      '<!DOCTYPE html><html><head><meta charset="utf-8"><title>Missing (default \\ not in data)</title>',
+      '<style>body{font:14px/1.5 system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;padding:16px}',
+      'table{width:100%;border-collapse:separate;border-spacing:0;border:1px solid #e2e8f0;border-radius:10px;overflow:hidden}',
+      'th,td{padding:8px 10px;border-bottom:1px solid #f1f5f9}',
+      'thead th{background:#f8fafc;text-align:left;font-weight:600;font-size:13px}',
+      'tbody tr:nth-child(odd) td{background:#fcfcff}</style></head><body>',
+      '<h3>Missing rows (default \\ not in data)</h3>',
+      table.outerHTML,
+      '</body></html>'
+    ].join('');
+    const blob = new Blob([doc], { type:'text/html;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const ts = new Date().toISOString().replace(/[:.]/g,'-');
+    a.href = url; a.download = `missing_table_${ts}.html`;
+    document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+  });
+
+  // ---------- Helpers ----------
+  function normalizeRow(r, width){ return Array.from({length:width}, (_,i)=> (r[i] ?? '')); }
+  function renderTable(headers, rows){
+    tableWrap.innerHTML = '';
+    if (!rows.length){ const d=document.createElement('div'); d.className='empty'; d.textContent='No rows to display.'; tableWrap.appendChild(d); return; }
+    const table = document.createElement('table');
+    const thead = document.createElement('thead'); const trh = document.createElement('tr');
+    headers.forEach(h => { const th=document.createElement('th'); th.textContent=h; trh.appendChild(th); });
+    thead.appendChild(trh); table.appendChild(thead);
+    const tbody = document.createElement('tbody');
+    rows.forEach(r => {
+      const tr = document.createElement('tr');
+      headers.forEach((_,i)=>{ const td=document.createElement('td'); td.textContent = (r[i] ?? ''); tr.appendChild(td); });
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody); tableWrap.appendChild(table);
+  }
+  function resetUI(){ msgs.innerHTML=''; tableWrap.innerHTML=''; lastHeaders=[]; lastRows=[]; sortLevels=[]; $('#sort-levels').innerHTML=''; btnDownloadHtml.disabled=true; }
+  function error(msg){ const d=document.createElement('div'); d.className='error'; d.textContent=msg; msgs.appendChild(d); }
+  function info(msg){ const d=document.createElement('div'); d.className='hintbox'; d.textContent=msg; msgs.appendChild(d); }
+})();
+</script>
+</body>
+</html>
