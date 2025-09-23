@@ -1,11 +1,150 @@
-<script>
-/* ---------- scoring + utils from your version stay the same ---------- */
-/* keep: SCORERS, num, clamp, pct, indicator, fmtTime, toRows, scoreFor ... */
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Dept Score Cards — Checkbox Multi-Select</title>
+<style>
+  :root{
+    --bg:#f7f9fc; --ink:#0f172a; --muted:#475569; --card:#ffffff; --line:#e2e8f0;
+    --accent:#2563eb; --good:#16a34a; --fair:#f59e0b; --poor:#dc2626;
+    --radius:14px; --shadow:0 8px 24px rgba(15,23,42,.06);
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 system-ui,-apple-system,Segoe UI,Roboto,Arial}
+  header{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between;padding:20px 24px}
+  header h1{margin:0;font-size:18px}
+  .toolbar{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
 
-/* Normalize any plausible API payload to [{dept, rows, updatedAt, updatedNum, score, ind}] */
+  /* Custom multi-select */
+  .multi{position:relative}
+  .multi-btn{
+    display:inline-flex;align-items:center;gap:8px;
+    padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:#fff;color:var(--ink);
+    cursor:pointer; min-width:240px;
+  }
+  .multi-btn .count{color:var(--muted);font-size:12px}
+  .multi-panel{
+    position:absolute; z-index:20; margin-top:6px; min-width:260px; max-height:260px; overflow:auto;
+    background:#fff; border:1px solid var(--line); border-radius:12px; box-shadow:var(--shadow); padding:10px; display:none;
+  }
+  .multi.open .multi-panel{display:block}
+  .multi-actions{display:flex; gap:8px; margin-bottom:8px}
+  .multi-actions button{
+    padding:6px 10px; border:1px solid var(--line); background:#f8fafc; border-radius:8px; cursor:pointer; color:var(--ink)
+  }
+  .multi-item{display:flex; align-items:center; gap:8px; padding:6px 4px; border-radius:8px}
+  .multi-item:hover{background:#f8fafc}
+  .multi-item input{width:16px; height:16px}
+
+  /* Sort select */
+  .toolbar select{
+    padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:#fff;color:var(--ink);
+  }
+
+  /* Cards */
+  .grid{display:grid;gap:16px;padding:0 24px 24px;grid-template-columns:repeat(auto-fit,minmax(260px,1fr))}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);
+        padding:16px 16px 12px;display:flex;flex-direction:column;gap:10px}
+  .dept{font-weight:800;font-size:20px;letter-spacing:.2px}
+  .meta{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .badge{font-size:11px;font-weight:700;border:1px solid var(--line);border-radius:999px;padding:2px 8px;color:var(--muted);background:#f8fafc}
+  .kv{display:grid;grid-template-columns:1fr auto;gap:6px 10px;align-items:center;border:1px solid var(--line);
+      border-radius:10px;padding:8px 10px;background:#fafafa}
+  .kv .key{color:var(--muted);font-weight:600}
+  .kv .val{font-family:ui-monospace,Menlo,Consolas,monospace;font-weight:600}
+  .scoreRow{display:flex;flex-direction:column;gap:8px;margin-top:2px}
+  .scoreTop{display:flex;align-items:center;gap:10px}
+  .scoreNum{font-weight:800}
+  .indicator{font-size:12px;font-weight:800;border-radius:999px;padding:4px 10px;border:1px solid}
+  .indicator.good{color:var(--good);border-color:var(--good);background:rgba(22,163,74,.08)}
+  .indicator.fair{color:var(--fair);border-color:var(--fair);background:rgba(245,158,11,.10)}
+  .indicator.poor{color:var(--poor);border-color:var(--poor);background:rgba(220,38,38,.10)}
+  .bar{height:10px;border-radius:999px;background:#eef2f7;border:1px solid var(--line);overflow:hidden}
+  .bar > span{display:block;height:100%;width:0%;background:linear-gradient(90deg,var(--accent),#60a5fa)}
+  .footer{margin-top:6px;color:var(--muted);font-size:12px;display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Department Score Cards</h1>
+  <div class="toolbar">
+    <!-- Checkbox-style multi-select -->
+    <div class="multi" id="deptMulti">
+      <button type="button" class="multi-btn" aria-haspopup="listbox" aria-expanded="false">
+        <span class="label">Filter: Departments</span>
+        <span class="count" id="multiCount">(all)</span>
+      </button>
+      <div class="multi-panel" role="listbox" aria-multiselectable="true">
+        <div class="multi-actions">
+          <button type="button" id="multiSelectAll">Select all</button>
+          <button type="button" id="multiClear">Clear</button>
+        </div>
+        <div id="multiList"></div>
+      </div>
+    </div>
+
+    <!-- Sort -->
+    <select id="sort">
+      <option value="dept-asc">Sort: Dept ↑</option>
+      <option value="dept-desc">Sort: Dept ↓</option>
+      <option value="score-desc" selected>Sort: Score ↓</option>
+      <option value="score-asc">Sort: Score ↑</option>
+      <option value="time-desc">Sort: Updated ↓</option>
+      <option value="time-asc">Sort: Updated ↑</option>
+    </select>
+  </div>
+</header>
+
+<div id="grid" class="grid" role="list"></div>
+
+<script>
+/* ------- Scoring functions (same idea as before; customizable per dept) ------- */
+const SCORERS = {
+  "Sales": (s) => clamp(pct(num(s.Wins), Math.max(1, num(s.Quota))) * 100 - clamp(num(s.ChurnPct)*2.5,0,50) + clamp(num(s.PipelineMM)*2,0,10), 0, 100),
+  "R&D":   (s) => clamp(clamp((num(s.Velocity)/50)*45,0,45) + clamp((num(s.CoveragePct)/100)*35,0,35) - clamp(num(s.CriticalBugs)*12,0,48) - clamp(num(s.OpenBugs)*0.6,0,30), 0, 100),
+  "Ops":   (s) => clamp(clamp((num(s.SLA99_pct)-95)*6,0,120) - clamp(num(s.MTTR_min)*0.7,0,50) - clamp(num(s.ChangeFailPct)*4.5,0,50) - clamp(num(s.Incidents)*4,0,40), 0, 100),
+  "Finance": (s)=> clamp(clamp((10-num(s.CloseDays))*6,0,60) + clamp(num(s.ForecastAccPct)*0.3,0,30) + clamp((10-num(s.OverrunPct))*2,0,20) + clamp((60-num(s.DSO_days))*0.5,-10,20), 0, 100),
+  "HR":    (s) => clamp(clamp((num(s.eNPS)+50)*0.6,0,60) + clamp((20-num(s.AttritionPct))*1.5,0,30) + clamp((45-num(s.TimeToHire_days))*0.6,0,27) - clamp(num(s.OpenRoles)*0.4,0,20), 0, 100),
+  "Marketing": (s)=> clamp(clamp((40-num(s.CPL_usd))*1.2,0,48) + clamp(num(s.CTR_pct)*6,0,36) + clamp(num(s.ConvRate_pct)*7,0,49) + clamp(num(s.Campaigns)*0.8,0,12), 0, 100),
+  "Support": (s)=> clamp(clamp(num(s.FCR_pct)*0.5,0,50) + clamp(num(s.CSAT_pct)*0.4,0,40) - clamp(num(s.Backlog)*0.2,0,25) - clamp(num(s.AHT_min)*1.5,0,30), 0, 100),
+  "Security":(s)=> clamp(clamp((num(s.PatchCompliance_pct)-80)*2,0,40) + clamp((30-num(s.MeanTTP_days))*1.2,0,36) + clamp((10-num(s.PhishFail_pct))*2,0,20) - clamp(num(s.CriticalFindings)*18,0,72) - clamp(num(s.OpenFindings)*1.2,0,36) + 30, 0, 100),
+  "IT":     (s)=> clamp(clamp((num(s.Uptime_pct)-99)*12,0,72) + clamp(num(s.Satisfaction_pct)*0.3,0,30) + clamp(num(s.DeployFreq_wk)*1.2,0,24) - clamp(num(s.ChangeFail_pct)*4.5,0,45), 0, 100),
+  "Logistics":(s)=> clamp(clamp(num(s.OTD_pct)*0.6,0,60) + clamp((2-num(s.Damage_pct))*10,0,20) + clamp((15-num(s.CostPerShip_usd))*1.2,0,18) + clamp((10-num(s.AvgLead_days))*2.0,0,20) - clamp(num(s.Backorders)*0.8,0,20), 0, 100),
+  "__default__": (s) => {
+    const nums = Object.values(s).map(num).filter(Number.isFinite);
+    if (!nums.length) return 50;
+    const avg = nums.reduce((a,b)=>a+b,0)/nums.length;
+    return clamp(60 + (50 - clamp(avg, 0, 50)), 0, 100);
+  }
+};
+
+/* ------- Utils ------- */
+function num(x){ const n = Number(x); return Number.isFinite(n) ? n : NaN; }
+function clamp(v,min,max){ return Math.max(min, Math.min(max, v)); }
+function pct(a,b){ return b === 0 ? 0 : a / b; }
+function indicator(score){
+  if (score >= 75) return { cls:'good', label:'Good' };
+  if (score >= 50) return { cls:'fair', label:'Fair' };
+  return { cls:'poor', label:'Poor' };
+}
+function fmtTime(iso){ if(!iso) return '—'; const d=new Date(iso);
+  return d.toLocaleString(undefined,{year:'numeric',month:'short',day:'2-digit',hour:'2-digit',minute:'2-digit'});}
+function toRows(obj){
+  const keys = Object.keys(obj).filter(k => !['updatedAt','dept','department','name'].includes(k));
+  keys.sort((a,b)=>{
+    const na = parseInt(String(a).replace(/\D/g,''),10), nb = parseInt(String(b).replace(/\D/g,''),10);
+    if (!Number.isNaN(na) && !Number.isNaN(nb)) return na - nb;
+    return a.localeCompare(b);
+  });
+  return keys.map(k => ({ key:k, val:String(obj[k]) }));
+}
+function scoreFor(dept, stats){ const fn = SCORERS[dept] || SCORERS["__default__"]; return clamp(Math.round(fn(stats)), 0, 100); }
+
+/* ------- Normalize API payload to entries[] ------- */
 function normalizeFromApi(payload){
   const root = ('data' in payload) ? payload.data : payload;
-
   if (Array.isArray(root)) {
     return root.map(rec => {
       const dept = rec.dept || rec.department || rec.name || 'Unknown';
@@ -29,19 +168,76 @@ function normalizeFromApi(payload){
   return [];
 }
 
-/* ---------- STATE: single source of truth ---------- */
+/* ------- STATE ------- */
 const STATE = {
   entries: [],
-  query: '',
-  sort: 'score-desc'
+  sort: 'score-desc',
+  filters: { depts: [] }   // checkbox selection
 };
 
-/* ---------- DOM ---------- */
-const gridEl = document.getElementById('grid');
-const qEl    = document.getElementById('q');
-const sortEl = document.getElementById('sort');
+/* ------- DOM ------- */
+const gridEl   = document.getElementById('grid');
+const sortEl   = document.getElementById('sort');
+const multiEl  = document.getElementById('deptMulti');
+const multiBtn = multiEl.querySelector('.multi-btn');
+const multiCnt = document.getElementById('multiCount');
+const listEl   = document.getElementById('multiList');
+const btnAll   = document.getElementById('multiSelectAll');
+const btnClear = document.getElementById('multiClear');
 
-/* ---------- helpers ---------- */
+/* ------- Multi-select building & behavior ------- */
+function populateDeptCheckboxes(list){
+  const uniq = [...new Set(list.map(e => e.dept))]
+    .sort((a,b)=> a.localeCompare(b, undefined, { numeric:true }));
+  listEl.innerHTML = uniq.map(d => `
+    <label class="multi-item">
+      <input type="checkbox" value="${d}">
+      <span>${d}</span>
+    </label>
+  `).join('');
+
+  // Restore current selection state
+  for (const cb of listEl.querySelectorAll('input[type="checkbox"]')) {
+    cb.checked = STATE.filters.depts.includes(cb.value);
+    cb.addEventListener('change', onCheckboxChange);
+  }
+  updateMultiCount();
+}
+
+function onCheckboxChange(){
+  const selected = Array.from(listEl.querySelectorAll('input[type="checkbox"]:checked')).map(cb => cb.value);
+  STATE.filters.depts = selected;
+  updateMultiCount();
+  render();
+}
+
+function updateMultiCount(){
+  const n = STATE.filters.depts.length;
+  multiCnt.textContent = n ? `${n} selected` : '(all)';
+}
+
+multiBtn.addEventListener('click', () => {
+  const open = multiEl.classList.toggle('open');
+  multiBtn.setAttribute('aria-expanded', String(open));
+});
+document.addEventListener('click', (e) => {
+  if (!multiEl.contains(e.target)) {
+    multiEl.classList.remove('open');
+    multiBtn.setAttribute('aria-expanded', 'false');
+  }
+});
+btnAll.addEventListener('click', () => {
+  for (const cb of listEl.querySelectorAll('input[type="checkbox"]')) cb.checked = true;
+  onCheckboxChange();
+});
+btnClear.addEventListener('click', () => {
+  for (const cb of listEl.querySelectorAll('input[type="checkbox"]')) cb.checked = false;
+  onCheckboxChange();
+});
+
+/* ------- Sort & Render ------- */
+sortEl.addEventListener('change', e => { STATE.sort = e.target.value; render(); });
+
 function applySort(arr, mode){
   const a = [...arr];
   if (mode === 'dept-asc')  a.sort((x,y)=>x.dept.localeCompare(y.dept, undefined, {numeric:true}));
@@ -53,19 +249,17 @@ function applySort(arr, mode){
   return a;
 }
 
-/* ---------- render reads from STATE (no args) ---------- */
 function render(){
-  const { entries, query, sort } = STATE;
-
-  const q = (query || '').trim().toLowerCase();
-  const filtered = q ? entries.filter(e => e.dept.toLowerCase().includes(q)) : entries;
+  const { entries, sort, filters } = STATE;
+  const sel = filters.depts;
+  const filtered = sel.length ? entries.filter(e => sel.includes(e.dept)) : entries;
   const view = applySort(filtered, sort);
 
   gridEl.innerHTML = '';
   if (!view.length) {
     const empty = document.createElement('div');
     empty.style.color = 'var(--muted)';
-    empty.textContent = q ? 'No departments match your search.' : 'No departments to display.';
+    empty.textContent = sel.length ? 'No departments match your selection.' : 'No departments to display.';
     gridEl.appendChild(empty);
     return;
   }
@@ -100,23 +294,16 @@ function render(){
   }
 }
 
-/* ---------- state setters ---------- */
-function setEntries(arr){ STATE.entries = Array.isArray(arr) ? arr : []; render(); }
-function setQuery(v){ STATE.query = v; render(); }
-function setSort(v){ STATE.sort = v; render(); }
-
-/* ---------- events ---------- */
-qEl.addEventListener('input', e => setQuery(e.target.value));
-sortEl.addEventListener('change', e => setSort(e.target.value));
-
-/* ---------- data load ---------- */
+/* ------- Data load from API ------- */
 async function loadData(){
   try{
     const res = await fetch('api/summary', { headers: { 'Accept':'application/json' } });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const json = await res.json();
     const parsed = normalizeFromApi(json);
-    setEntries(parsed); // updates STATE.entries and re-renders
+    STATE.entries = parsed;
+    populateDeptCheckboxes(STATE.entries);
+    render();
   }catch(err){
     gridEl.innerHTML = `<div style="color:#dc2626">Failed to load data: ${String(err)}</div>`;
   }
@@ -125,3 +312,5 @@ async function loadData(){
 /* init */
 loadData();
 </script>
+</body>
+</html>
