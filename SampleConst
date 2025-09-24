@@ -1,0 +1,78 @@
+const mdd = new MultiDrilldown({
+  container: '#grid',
+  name: 'MainGrid',
+  csv: './data/tracker.csv',
+  groupByIdx: [0],        // group by first column
+  statusIdx: [5],         // colorize status column
+  colorColsIdx: [2, 3],   // optional extra coloring
+  defColumn: {
+    // column 2 drilldown
+    2: ['./data/levelA_a0.csv', './data/levelB_a1.csv'],
+    // column 4 drilldown
+    4: ['./data/levelA_b0.csv']
+  },
+  promoteIdx: 6,           // promote button column
+  promoteCheck: [0, 1],    // build key from col0+col1
+  promoteData: [2, 3, 5],  // store values from these cols in summary.json
+  sep: '_',
+  debug: true,
+
+  defaultSearches: {
+    // Main grid presets
+    main: [
+      {
+        text: 'Search for Mark',
+        data: [
+          { field: 'fname', type: 'text', operator: 'contains', value: 'Mark' },
+          { field: 'lname', type: 'text', operator: 'contains', value: 'Mark' }
+        ],
+        logic: 'OR'
+      },
+      {
+        text: 'Search for "e"',
+        data: [
+          { field: 'fname', type: 'text', operator: 'contains', value: 'e' },
+          { field: 'lname', type: 'text', operator: 'contains', value: 'e' }
+        ],
+        logic: 'OR'
+      }
+    ],
+
+    // Per-column popup presets
+    byCol: {
+      2: { // if column 2 is clicked
+        0: [ // level 0 popup presets
+          {
+            text: 'Slack < 0',
+            data: [
+              { field: 'Slack', type: 'float', operator: 'between', value: -999, value2: 0 }
+            ],
+            logic: 'AND'
+          }
+        ],
+        1: [ // level 1 popup presets
+          {
+            text: 'Group PG1 or PG2',
+            data: [
+              { field: 'Group', type: 'text', operator: 'in', value: ['PG1','PG2'] }
+            ],
+            logic: 'OR'
+          }
+        ]
+      },
+      4: { // if column 4 is clicked
+        0: [
+          {
+            text: 'Begins with "U_"',
+            data: [
+              { field: 'Cell', type: 'text', operator: 'begins', value: 'U_' }
+            ],
+            logic: 'AND'
+          }
+        ]
+      }
+    }
+  }
+});
+
+mdd.init();
