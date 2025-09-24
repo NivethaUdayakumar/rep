@@ -1,0 +1,27 @@
+_setupPromoteOnMainGrid(grid) {
+  const col = grid.columns[this.promoteIdx];
+
+  // interpret truthy "yes"
+  const yesMatcher = (v) => {
+    const s = String(v ?? '').trim().toLowerCase();
+    return s === 'yes' || s === 'y' || s === 'true' || s === '1';
+  };
+
+  const originalRender = col.render;
+  col.render = (rec) => {
+    // w2ui tree/group internals:
+    const isChild   = !!(rec?.w2ui?.parent_recid);  // child rows have a parent_recid
+    const isSummary = !!(rec?.w2ui?.summary);       // summary/group header/footer rows
+
+    if (isChild || isSummary) return '';            // only show on parent (top-level) rows
+
+    const field = col.field;
+    const val = field ? rec[field] : '';
+    if (!yesMatcher(val)) return '';
+    void originalRender; // preserve for reference if you restore later
+
+    return `<button class="w2ui-btn btn-promote" data-recid="${rec.recid}" title="Promote this row">promote</button>`;
+  };
+
+  try { grid.refresh(); } catch {}
+}
