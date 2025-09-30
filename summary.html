@@ -3,11 +3,11 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Department Cards (with w2ui popups)</title>
+  <title>Department Cards (w2ui popups, order preserved)</title>
 
-  <!-- If you already host w2ui-2.0 locally, use these two lines instead: -->
-  <link rel="stylesheet" href="./w2ui-2.0.min.css" />
-  <script src="./w2ui-2.0.min.js"></script>
+  <!-- Use your local copies of w2ui 2.0 -->
+  <link rel="stylesheet" href="w2ui-2.0.min.css">
+  <script src="w2ui-2.0.min.js"></script>
 
   <style>
     :root{
@@ -20,7 +20,7 @@
     header{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between;padding:20px 24px}
     header h1{margin:0;font-size:18px}
     .toolbar{display:flex;gap:10px}
-    .toolbar input[type="search"], .toolbar select{
+    .toolbar input[type="search"]{
       padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:#fff;color:var(--ink);
     }
     .grid{display:grid;gap:16px;padding:0 24px 24px;grid-template-columns:repeat(auto-fit,minmax(260px,1fr))}
@@ -54,111 +54,86 @@
   <h1>Department Score Cards</h1>
   <div class="toolbar">
     <input id="q" type="search" placeholder="Search departments…" />
-    <select id="sort">
-      <option value="dept-asc">Sort: Dept ↑</option>
-      <option value="dept-desc">Sort: Dept ↓</option>
-      <option value="score-desc" selected>Sort: Score ↓</option>
-      <option value="score-asc">Sort: Score ↑</option>
-      <option value="time-desc">Sort: Updated ↓</option>
-      <option value="time-asc">Sort: Updated ↑</option>
-    </select>
   </div>
 </header>
 
 <div id="grid" class="grid" role="list"></div>
 
 <script>
-/* ==================== REQUIRED JSON FORMAT ====================
-{
-  "dept_name": {
-    "HeaderForCol2": "val2",
-    "HeaderForCol5": "val3",
-    "HeaderForCol6": "val5",
-    "f1": "reports.html",
-    "f2": "logs/log.txt",
-    "f3": "",
-    "updatedAt": "2025-09-29T12:34:56.789Z"
-  },
-  ...
-}
-The f1/f2/f3 are NOT displayed; clicking the corresponding header rows opens the linked file in a w2ui popup (showMax:true).
-Mappings (fixed): f1→HeaderForCol2, f2→HeaderForCol5, f3→HeaderForCol6.
-================================================================= */
+/* ==================== REQUIRED JSON FORMAT (order preserved) ====================
+Top-level object keys are department names, in the display order.
+Each department object:
+- Several *display headers* (any unique keys) with string/number values.
+- The same number of link keys named f1, f2, f3, ... in insertion order.
+- updatedAt (optional).
 
-// Demo data (add more departments as needed)
+Display header i maps to link fi (1-based) by position of appearance.
+f* keys are NOT displayed; clicking the corresponding display row opens its link in a w2ui popup.
+=============================================================================== */
+
 const data = {
   "dept_etc": {
     "HeaderForCol2": "Overall Summary",
     "HeaderForCol5": "Latest Log",
     "HeaderForCol6": "—",
-    "f1": "report.html",
+    "f1": "reports/summary.html",
     "f2": "logs/log.txt",
     "f3": "",
     "updatedAt": "2025-09-29T12:34:56.789Z"
   },
   "dept_finance": {
-    "HeaderForCol2": "Close Report",
-    "HeaderForCol5": "Audit Log",
-    "HeaderForCol6": "Variance View",
-    "f1": "report.html",
+    "Close Report": "FY25-Q3",
+    "Audit Trail": "Complete",
+    "Variance View": "Ready",
+    "f1": "reports/close.html",
     "f2": "logs/audit.txt",
-    "f3": "report.html",
+    "f3": "reports/variance.html",
     "updatedAt": "2025-09-28T09:10:00.000Z"
   }
 };
 
-/* ==================== Scoring (kept simple here) ==================== */
-const SCORERS = {
-  "__default__": (s) => 50  // fixed neutral score for this format (can be replaced with your own logic)
-};
-
-/* ==================== Utilities ==================== */
+/* ==================== Scoring (simple placeholder) ==================== */
 function clamp(v,min,max){ return Math.max(min, Math.min(max, v)); }
+function scoreFor(stats){
+  // Example neutral score; swap with your own logic if needed.
+  return 60;
+}
 function indicator(score){ if (score>=75) return {cls:'good',label:'Good'}; if (score>=50) return {cls:'fair',label:'Fair'}; return {cls:'poor',label:'Poor'}; }
 function fmtTime(iso){ if(!iso) return '—'; const d=new Date(iso); return d.toLocaleString(undefined,{year:'numeric',month:'short',day:'2-digit',hour:'2-digit',minute:'2-digit'}); }
-function scoreFor(stats){ const fn = SCORERS["__default__"]; return clamp(Math.round(fn(stats)),0,100); }
 
-const LINK_PAIRS = [
-  ["HeaderForCol2","f1"],
-  ["HeaderForCol5","f2"],
-  ["HeaderForCol6","f3"],
-];
+/* ==================== Mapping & normalization ==================== */
+/** Returns [{ key, val, link|null }...] in the exact order they appeared in the JSON. */
+function rowsWithLinks(stats){
+  const displayKeys = [];
+  const linkKeys = [];
 
-/** Build a map { displayKey -> url } for keys that have corresponding fN links */
-function buildLinkMap(stats){
-  const map = {};
-  for (const [hdr, fx] of LINK_PAIRS){
-    const url = stats[fx];
-    if (stats[hdr] !== undefined && url && String(url).trim() !== "") {
-      map[hdr] = String(url).trim();
-    }
+  // Collect keys in insertion order
+  for (const k of Object.keys(stats)) {
+    if (k === 'updatedAt') continue;
+    if (/^f\d+$/i.test(k)) linkKeys.push(k);
+    else displayKeys.push(k);
   }
-  return map;
+
+  const n = Math.min(displayKeys.length, linkKeys.length);
+  const out = [];
+  for (let i = 0; i < displayKeys.length; i++) {
+    const key = displayKeys[i];
+    const val = String(stats[key]);
+    const link = (i < n) ? String(stats[linkKeys[i]] ?? '').trim() : '';
+    out.push({ key, val, link: link || null });
+  }
+  return out;
 }
 
-/** Convert stats to rows for display (hide f1..fN and updatedAt) */
-function toRows(stats){
-  const keys = Object.keys(stats).filter(k => !/^f\d+$/i.test(k) && k !== 'updatedAt');
-  // Keep stable order but nudge "HeaderForCol2/5/6" to the top in numeric order 2,5,6
-  const priority = { HeaderForCol2: 1, HeaderForCol5: 2, HeaderForCol6: 3 };
-  keys.sort((a,b)=>{
-    const pa = priority[a] ?? 999, pb = priority[b] ?? 999;
-    if (pa !== pb) return pa - pb;
-    return a.localeCompare(b);
-  });
-  return keys.map(k => ({ key:k, val:String(stats[k]) }));
-}
-
-/* ==================== Transform ==================== */
-function normalizeEntries(obj){
-  return Object.entries(obj).map(([dept, stats])=>{
-    const score = scoreFor(stats);
+function normalizeEntries(dataObj){
+  // Object.entries preserves insertion order of top-level JSON object
+  return Object.entries(dataObj).map(([dept, stats]) => {
+    const rows = rowsWithLinks(stats);         // ordered rows with link mapping
+    const score = clamp(Math.round(scoreFor(stats)), 0, 100);
     return {
       dept,
-      rows: toRows(stats),
-      linkByKey: buildLinkMap(stats),
+      rows,
       updatedAt: stats.updatedAt || null,
-      updatedNum: stats.updatedAt ? Date.parse(stats.updatedAt) : 0,
       score,
       ind: indicator(score)
     };
@@ -167,52 +142,35 @@ function normalizeEntries(obj){
 
 let entries = normalizeEntries(data);
 
-/* ==================== Sorting / Search ==================== */
-const gridEl = document.getElementById('grid');
-const qEl = document.getElementById('q');
-const sortEl = document.getElementById('sort');
-
-function applySort(arr, mode){
-  const a = [...arr];
-  if (mode === 'dept-asc')  a.sort((x,y)=>x.dept.localeCompare(y.dept, undefined, {numeric:true}));
-  if (mode === 'dept-desc') a.sort((x,y)=>y.dept.localeCompare(x.dept, undefined, {numeric:true}));
-  if (mode === 'score-desc')a.sort((x,y)=>y.score - x.score);
-  if (mode === 'score-asc') a.sort((x,y)=>x.score - y.score);
-  if (mode === 'time-desc') a.sort((x,y)=>y.updatedNum - x.updatedNum);
-  if (mode === 'time-asc')  a.sort((x,y)=>x.updatedNum - y.updatedNum);
-  return a;
-}
-
-/* ==================== w2ui popup helper ==================== */
+/* ==================== w2ui popup helper (no window.open fallback) ==================== */
 function openPopup(url, title){
+  const safe = String(url || '').trim();
+  if (!safe) return;
+
   const body = `
     <div style="width:100%;height:100%;padding:0;margin:0;">
-      <iframe src="${url}" style="border:0;width:100%;height:100%;"></iframe>
+      <iframe src="${safe}" style="border:0;width:100%;height:100%;"></iframe>
     </div>`;
-  if (window.w2popup && typeof w2popup.open === 'function') {
-    w2popup.open({
-      title: title || 'Preview',
-      width: Math.min(window.innerWidth*0.9, 1200),
-      height: Math.min(window.innerHeight*0.9, 800),
-      showMax: true,
-      modal: true,
-      body
-    });
-  } /*else {
-    // Fallback if w2ui is not present
-    const w = window.open(url, '_blank', 'noopener,noreferrer');
-    if (!w) alert('Popup blocked. Please allow popups for this site.');
-  }*/
+
+  w2popup.open({
+    title: title || 'Preview',
+    width: Math.min(window.innerWidth*0.9, 1200),
+    height: Math.min(window.innerHeight*0.9, 800),
+    showMax: true,
+    modal: true,
+    body
+  });
 }
 
-/* ==================== Render ==================== */
+/* ==================== Render (preserve order; no sorting) ==================== */
+const gridEl = document.getElementById('grid');
+const qEl = document.getElementById('q');
+
 function render(){
   const query = (qEl.value || '').trim().toLowerCase();
-  const mode = sortEl.value;
-  const sorted = applySort(entries, mode);
 
   gridEl.innerHTML = '';
-  for (const e of sorted) {
+  for (const e of entries) {
     if (query && !e.dept.toLowerCase().includes(query)) continue;
 
     const card = document.createElement('article');
@@ -240,25 +198,21 @@ function render(){
 
     const body = card.querySelector('.body');
     for (const r of e.rows) {
-      const hasLink = Object.prototype.hasOwnProperty.call(e.linkByKey, r.key);
       const row = document.createElement('div');
-      row.className = 'kv' + (hasLink ? ' clickable' : '');
+      row.className = 'kv' + (r.link ? ' clickable' : '');
       row.innerHTML = `
         <div class="key">${r.key}</div>
         <div class="val" title="${r.val}">${r.val}</div>
       `;
-      if (hasLink) {
-        row.title = `Open: ${e.linkByKey[r.key]}`;
-        row.addEventListener('click', () => openPopup(e.linkByKey[r.key], `${e.dept} — ${r.key}`));
-        row.addEventListener('keydown', (ev) => {
-          if (ev.key === 'Enter' || ev.key === ' ') {
-            ev.preventDefault();
-            openPopup(e.linkByKey[r.key], `${e.dept} — ${r.key}`);
-          }
-        });
-        row.setAttribute('tabindex','0');
+      if (r.link) {
+        row.title = `Open: ${r.link}`;
+        row.tabIndex = 0;
         row.setAttribute('role','button');
         row.setAttribute('aria-label', `Open ${r.key}`);
+        row.addEventListener('click', () => openPopup(r.link, `${e.dept} — ${r.key}`));
+        row.addEventListener('keydown', ev => {
+          if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); openPopup(r.link, `${e.dept} — ${r.key}`); }
+        });
       }
       body.appendChild(row);
     }
@@ -275,14 +229,13 @@ function render(){
 }
 
 qEl.addEventListener('input', render);
-sortEl.addEventListener('change', render);
 render();
 
-/* ===== Example: re-normalize after loading real data =====
-fetch('/api/summary').then(r=>r.json()).then(obj=>{
-  entries = normalizeEntries(obj);
-  render();
-}).catch(console.error);
+/* ===== Example: load from API while preserving order =====
+fetch('/api/summary')
+  .then(r => r.json())
+  .then(obj => { entries = normalizeEntries(obj); render(); })
+  .catch(console.error);
 */
 </script>
 </body>
