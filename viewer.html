@@ -1,0 +1,158 @@
+
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>w2ui Popup Table + In-Popup HTML Viewer</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <link rel="stylesheet" href="./w2ui-2.0.min.css" />
+  <script src="./w2ui-2.0.min.js"></script>
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;padding:24px}
+    .btn{padding:9px 13px;border:1px solid #bbb;border-radius:8px;background:#f7f7f7;cursor:pointer}
+    .hidden{display:none!important}
+    /* Home table */
+    .home-wrap{position:absolute;inset:0;padding:16px;overflow:auto}
+    table{border-collapse:collapse;width:100%}
+    th,td{border:1px solid #ddd;padding:8px}
+    th{background:#f3f3f3;text-align:left}
+    .cell-link{text-decoration:underline;cursor:pointer}
+    /* Viewer */
+    .viewer-wrap{position:absolute;inset:0;display:flex;flex-direction:column}
+    .viewer-toolbar{display:flex;gap:8px;align-items:center;padding:8px;border-bottom:1px solid #ddd}
+    .viewer-addr{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#555}
+    .viewer-iframe{flex:1;border:0;width:100%}
+  </style>
+</head>
+<body>
+  <h1>HTML Table inside w2ui Popup → Click to open HTML in same popup</h1>
+  <p>Any element in the table with <code>data-url="..."</code> will open the in-popup viewer.</p>
+  <button class="btn" id="open">Open Popup</button>
+
+  <script>
+  // --- Simple history state for the viewer ---
+  const hist = {
+    stack: [], idx: -1,
+    push(u){ if(this.idx < this.stack.length-1) this.stack = this.stack.slice(0,this.idx+1); this.stack.push(u); this.idx = this.stack.length-1; },
+    cur(){ return this.idx>=0 ? this.stack[this.idx] : null; },
+    canBack(){ return this.idx>0; }, canFwd(){ return this.idx < this.stack.length-1; },
+    back(){ if(this.canBack()){ this.idx--; return this.stack[this.idx]; } return null; },
+    fwd(){ if(this.canFwd()){ this.idx++; return this.stack[this.idx]; } return null; },
+    reset(){ this.stack=[]; this.idx=-1; }
+  };
+
+  function setNavBtns(viewer){
+    viewer.querySelector('[data-act="back"]').disabled = !hist.canBack();
+    viewer.querySelector('[data-act="fwd"]').disabled  = !hist.canFwd();
+  }
+  function loadURL(viewer, url){
+    viewer.querySelector('#viewer-addr').textContent = url ?? '';
+    if (url) viewer.querySelector('#viewer-iframe').src = url;
+  }
+  function show(el){ el.classList.remove('hidden'); }
+  function hide(el){ el.classList.add('hidden'); }
+
+  // Delegation: capture clicks anywhere in container; open nearest element with [data-url]
+  function attachDataUrlClickDelegate(container, onUrl){
+    container.addEventListener('click', (ev) => {
+      let el = ev.target;
+      while (el && el !== container) {
+        if (el.nodeType === 1 && el.hasAttribute('data-url')) {
+          const url = el.getAttribute('data-url');
+          if (url) onUrl(url, ev);
+          break;
+        }
+        el = el.parentNode;
+      }
+    });
+  }
+
+  document.getElementById('open').addEventListener('click', () => {
+    w2popup.open({
+      title: 'HTML Table ➜ In-Popup HTML Viewer',
+      width: 900, height: 600, showMax: true,
+      body: `
+        <div id="popup-root" style="position:relative;width:100%;height:100%;">
+          <!-- Home view: plain HTML table -->
+          <div id="home" class="home-wrap">
+            <h3>Reports</h3>
+            <table>
+              <thead>
+                <tr><th>ID</th><th>Name</th><th>Report</th></tr>
+              </thead>
+              <tbody id="home-tbody">
+                <tr>
+                  <td>1</td>
+                  <td>Alpha</td>
+                  <td data-url="t1.html" class="cell-link">Open Alpha</td>
+                </tr>
+                <tr>
+                  <td>2</td>
+                  <td>Bravo</td>
+                  <td><span class="cell-link" data-url="t1.html">Open Bravo</span></td>
+                </tr>
+                <tr>
+                  <td>3</td>
+                  <td>Charlie</td>
+                  <td><a href="javascript:void(0)" class="cell-link" data-url="t2.html">Open Charlie</a></td>
+                </tr>
+                <tr>
+                  <td>4</td>
+                  <td>Delta</td>
+                  <td>(no link)</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <!-- Viewer view -->
+          <div id="viewer" class="viewer-wrap hidden">
+            <div class="viewer-toolbar">
+              <button class="btn" data-act="back"   title="Back">&larr;</button>
+              <button class="btn" data-act="fwd"    title="Forward">&rarr;</button>
+              <button class="btn" data-act="home"   title="Back to Home">Home</button>
+              <button class="btn" data-act="reload" title="Reload">Reload</button>
+              <button class="btn" data-act="open"   title="Open in New Tab">Open</button>
+              <div class="viewer-addr" id="viewer-addr"></div>
+            </div>
+            <iframe class="viewer-iframe" id="viewer-iframe"
+                    sandbox="allow-same-origin allow-scripts allow-forms"></iframe>
+          </div>
+        </div>
+      `,
+      onOpen(ev){
+        ev.onComplete = () => {
+          const root   = document.getElementById('popup-root');
+          const home   = document.getElementById('home');
+          const viewer = document.getElementById('viewer');
+
+          // Click on any element in the Home table with data-url
+          attachDataUrlClickDelegate(home, (url) => {
+            hist.push(url);
+            loadURL(viewer, hist.cur());
+            setNavBtns(viewer);
+            hide(home); show(viewer);
+          });
+
+          // Viewer toolbar behavior
+          viewer.addEventListener('click', (e) => {
+            const act = e.target.getAttribute('data-act'); if (!act) return;
+            if (act === 'back')   { const u = hist.back();   if (u){ loadURL(viewer,u); setNavBtns(viewer); } }
+            if (act === 'fwd')    { const u = hist.fwd();    if (u){ loadURL(viewer,u); setNavBtns(viewer); } }
+            if (act === 'home')   { hide(viewer); show(home); }
+            if (act === 'reload') { const u = hist.cur(); if (u) loadURL(viewer,u); }
+            if (act === 'open')   { const u = hist.cur(); if (u) window.open(u,'_blank','noopener'); }
+          });
+
+          // Start on Home view
+          hist.reset(); hide(viewer); show(home);
+        };
+      },
+      onMax(e){ e.onComplete = () => {/* nothing needed; static layout */} },
+      onMin(e){ e.onComplete = () => {/* nothing needed */} }
+    });
+  });
+  </script>
+</body>
+</html>
+
