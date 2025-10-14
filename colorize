@@ -1,0 +1,12 @@
+#colorize(rec, fieldName, colIdx) {
+  const v = rec[fieldName] ?? '';
+  const wantColor = Array.isArray(this.colorColsIdx) && this.colorColsIdx.includes(colIdx);
+  if (!wantColor) return this.#esc(v);
+
+  const st = String(v).trim().toLowerCase();
+  const cls = st === 'failed' ? 'tb-failed'
+            : st === 'running' ? 'tb-running'
+            : st === 'completed' ? 'tb-completed' : '';
+  const spin = st === 'running' ? '<span class="tb-loader"></span>' : '';
+  return `<span class="tb-cell ${cls}">${this.#esc(v)}${spin}</span>`;
+}
