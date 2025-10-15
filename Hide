@@ -1,0 +1,8 @@
+hideCols(colIds = []) {
+  if (!this.grid) return;
+  colIds.forEach(id => {
+    const col = this.grid.getColumn(id);
+    if (col) this.grid.hideColumn(col.field);
+  });
+}
+tb.hideCols([2, 5, 7]);
