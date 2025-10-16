@@ -1,0 +1,15 @@
+import pandas as pd
+
+df = pd.DataFrame({
+    'Name': ['Alice', 'Bob'],
+    'Profile': ['https://example.com/alice', 'https://example.com/bob']
+})
+
+# Convert URL text to clickable links
+df['Profile'] = df['Profile'].apply(lambda x: f'<a href="{x}" target="_blank">{x}</a>')
+
+# Convert to HTML (with escaping off so <a> renders)
+html_table = df.to_html(escape=False, index=False)
+
+with open('table.html', 'w') as f:
+    f.write(html_table)
