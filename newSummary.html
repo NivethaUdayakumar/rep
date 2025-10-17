@@ -1,0 +1,459 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Department and Unit Summary</title>
+
+  <!-- Local w2ui 2.0 -->
+  <link rel="stylesheet" href="w2ui-2.0.min.css">
+  <script src="w2ui-2.0.min.js"></script>
+
+  <style>
+    :root{
+      --bg:#f7f9fc; --ink:#0f172a; --muted:#475569; --card:#ffffff; --line:#e2e8f0;
+      --accent:#2563eb; --good:#16a34a; --fair:#f59e0b; --poor:#dc2626;
+      --radius:14px; --shadow:0 8px 24px rgba(15,23,42,.06);
+    }
+    *{box-sizing:border-box}
+    body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 system-ui,-apple-system,Segoe UI,Roboto,Arial}
+    header{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between;padding:20px 24px}
+    header h1{margin:0;font-size:18px}
+    .toolbar{display:flex;gap:10px}
+    .toolbar input[type="search"]{
+      padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:#fff;color:var(--ink);
+    }
+
+    .grid{display:grid;gap:16px;padding:0 24px 24px;grid-template-columns:repeat(auto-fit,minmax(260px,1fr))}
+    .card{
+      background:var(--card);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);
+      padding:16px 16px 12px;display:flex;flex-direction:column;gap:10px;position:relative
+    }
+    .dept{font-weight:800;font-size:20px;letter-spacing:.2px;padding-right:120px}
+    .meta{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+    .badge{font-size:11px;font-weight:700;border:1px solid var(--line);border-radius:999px;padding:2px 8px;color:var(--muted);background:#f8fafc}
+
+    /* Score styles */
+    .scoreWrap{position:absolute;top:12px;right:12px;display:flex;flex-direction:column;align-items:flex-end;gap:4px}
+    .scoreVal{font-weight:900;font-size:28px;line-height:1}
+    .scoreVal small{font-size:12px;color:var(--muted);margin-left:2px}
+    .scoreBadge{font-size:11px;font-weight:800;border-radius:999px;padding:2px 8px;border:1px solid var(--line);background:#fff}
+    .scoreGood{color:var(--good);border-color:var(--good)}
+    .scoreFair{color:var(--fair);border-color:var(--fair)}
+    .scorePoor{color:var(--poor);border-color:var(--poor)}
+
+    .kv{display:grid;grid-template-columns:1fr auto;gap:6px 10px;align-items:center;border:1px solid var(--line);
+        border-radius:10px;padding:8px 10px;background:#fafafa}
+    .kv .key{color:var(--muted);font-weight:600}
+    .kv .val{font-family:ui-monospace,Menlo,Consolas,monospace;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:320px}
+    .kv.clickable{cursor:pointer;background:#f0f7ff;border-color:#cfe0ff}
+    .kv.clickable:hover{outline:2px solid #cfe0ff}
+
+    .footer{margin-top:6px;color:var(--muted);font-size:12px;display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap}
+
+    .popup-wrap{padding:12px}
+    .unit-grid{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(260px,1fr))}
+    .unit-title{font-weight:700;margin-bottom:6px;padding-right:90px;position:relative}
+    .unit-score{position:absolute;top:0;right:0;display:flex;flex-direction:column;align-items:flex-end;gap:2px}
+    .unit-score .sv{font-weight:900}
+    .unit-score .sb{font-size:10px;padding:1px 6px;border-radius:999px;border:1px solid var(--line)}
+    .unit-updated{font-size:12px;color:var(--muted);margin-top:6px}
+
+    .bar{display:flex;justify-content:space-between;align-items:center;padding:6px 10px;border-bottom:1px solid var(--line);gap:8px}
+    .navbtn{padding:6px 10px;border:1px solid var(--line);border-radius:8px;background:#fff;cursor:pointer}
+    .navbtn:disabled{opacity:.4;cursor:not-allowed}
+    .filetitle{font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:60vw}
+  </style>
+</head>
+<body>
+<header>
+  <h1>Department Summary</h1>
+  <div class="toolbar">
+    <input id="q" type="search" placeholder="Search departments" />
+  </div>
+</header>
+
+<div id="grid" class="grid" role="list"></div>
+
+<script>
+/* ==================== INPUT JSON FORMAT ====================
+{
+  "dept1_unit1": { "k1":"v1", "k2":"v2", ..., "f1":"fileA", "f2":"fileB", ..., "updatedAt":"ISO" },
+  "dept1_unit2": { ... },
+  "dept2_unit1": { ... }
+}
+Each fX maps by position to the corresponding data row position.
+============================================================== */
+
+/* Replace this with your real data load if needed */
+const data = window.summaryData || {
+  "dept1_unit1":{
+    "a":"A1","b":"B1","c":"C1","d":"D1","e":"E1","f":"F1",
+    "f1":"files/a1.html","f2":"files/b1.html","f3":"files/c1.html","f4":"files/d1.html","f5":"files/e1.html","f6":"files/f1.html",
+    "updatedAt": "2025-10-12T10:00:00Z"
+  },
+  "dept1_unit2":{
+    "a":"A2","b":"B2","c":"C2","d":"D2","e":"E2","f":"F2",
+    "f1":"files/a2.html","f2":"files/b2.html","f3":"files/c2.html","f4":"files/d2.html","f5":"files/e2.html","f6":"files/f2.html",
+    "updatedAt": "2025-10-16T09:00:00Z"
+  },
+  "dept2_unit1":{
+    "a":"A3","b":"B3","c":"C3","d":"D3","e":"E3","f":"F3",
+    "f1":"files/a3.html","f2":"files/b3.html","f3":"files/c3.html","f4":"files/d3.html","f5":"files/e3.html","f6":"files/f3.html",
+    "updatedAt": "2025-10-01T11:00:00Z"
+  }
+};
+
+/* ==================== Helpers ==================== */
+function clamp(v, lo, hi){ return Math.max(lo, Math.min(hi, v)); }
+function fmt1(n){ return (Math.round(n*10)/10).toFixed(1); }
+function fmtTime(iso){ if(!iso) return 'NA'; const d=new Date(iso); return d.toLocaleString(undefined,{year:'numeric',month:'short',day:'2-digit',hour:'2-digit',minute:'2-digit'}); }
+function daysDiff(a,b){ return Math.abs((a-b)/(1000*60*60*24)); }
+function splitKey(k){
+  const idx = k.indexOf('_');
+  if (idx < 0) return { dept:k, unit:'' };
+  return { dept:k.slice(0, idx), unit:k.slice(idx+1) };
+}
+
+/* Extract ordered data rows and matching links for a single unit object */
+function rowsWithLinks(stats){
+  const displayKeys = [];
+  const linkKeys = [];
+  for (const k of Object.keys(stats)) {
+    if (k === 'updatedAt') continue;
+    if (/^f\d+$/i.test(k)) linkKeys.push(k);
+    else displayKeys.push(k);
+  }
+  const out = [];
+  const pairs = Math.min(displayKeys.length, linkKeys.length);
+  for (let i = 0; i < displayKeys.length; i++) {
+    const key = displayKeys[i];
+    const val = String(stats[key]);
+    const link = i < pairs ? String(stats[linkKeys[i]] || '').trim() : '';
+    out.push({ key, val, link: link || null });
+  }
+  return out;
+}
+
+/* Scoring
+   Based on remaining fields only, not fX keys, not updatedAt.
+   Completeness: fraction of non empty values
+   Freshness: small bonus for recent updates
+   Error hints: penalty if values include error words
+   Result scaled to 0..20 and clamped
+*/
+function computeUnitScore(stats){
+  const keys = Object.keys(stats).filter(k => k !== 'updatedAt' && !/^f\d+$/i.test(k));
+  const n = keys.length;
+  if (n === 0) return 0;
+
+  let filled = 0;
+  let penalty = 0;
+
+  const errRx = /(err|error|fail|failed|timeout|na|n\/a|missing|unknown|invalid)/i;
+
+  for (const k of keys) {
+    const v = stats[k];
+    const s = v == null ? '' : String(v).trim();
+    if (s && s.toLowerCase() !== 'na' && s.toLowerCase() !== 'n/a') filled++;
+    if (errRx.test(s)) penalty += 0.2; // simple penalty per hit
+  }
+  penalty = Math.min(penalty, 0.6); // cap penalty
+
+  const completeness = filled / n;
+
+  let freshness = 0;
+  const t = Date.parse(stats.updatedAt || '');
+  if (!isNaN(t)) {
+    const d = daysDiff(new Date(), t);
+    if (d <= 7) freshness = 0.1;
+    else if (d <= 30) freshness = 0.05;
+  }
+
+  let score01 = clamp(completeness - penalty + freshness, 0, 1);
+  let score20 = clamp(score01 * 20, 0, 20);
+  return Number(fmt1(score20));
+}
+
+function scoreClass(score){
+  if (score >= 14) return { text:'Good', cls:'scoreGood' };
+  if (score >= 10) return { text:'Fair', cls:'scoreFair' };
+  return { text:'Poor', cls:'scorePoor' };
+}
+
+/* Build groups: dept -> list of units in insertion order */
+function buildGroups(obj){
+  const groups = new Map();
+  for (const [k, v] of Object.entries(obj)) {
+    const {dept, unit} = splitKey(k);
+    if (!groups.has(dept)) groups.set(dept, []);
+    groups.get(dept).push({ unit, stats: v, key: k });
+  }
+  return groups;
+}
+
+/* Pick representative unit for first level last three rows: most recent updatedAt, fallback first */
+function pickRepresentative(units){
+  let best = null, bestTime = -Infinity;
+  for (const u of units) {
+    const t = Date.parse(u.stats.updatedAt || '');
+    if (!isNaN(t) && t > bestTime) { best = u; bestTime = t; }
+  }
+  return best || units[0];
+}
+
+/* ==================== Popup body render helpers ==================== */
+function popupSetTitle(text){
+  if (window.w2popup && typeof w2popup.title === 'function') w2popup.title(text);
+  else {
+    const tEl = document.querySelector('#w2ui-popup .w2ui-popup-title');
+    if (tEl) tEl.textContent = text;
+  }
+}
+function popupSetBody(html, onReady){
+  const body = document.querySelector('#w2ui-popup .w2ui-popup-body');
+  if (body) {
+    body.innerHTML = html;
+    setTimeout(() => { if (typeof onReady === 'function') onReady(); }, 0);
+  }
+}
+
+/* Render the unit cards inside the already open popup */
+function renderUnitsInPopup(dept, units){
+  const wrap = document.createElement('div');
+  wrap.className = 'popup-wrap';
+  wrap.innerHTML = `<div style="margin-bottom:10px;font-weight:800;font-size:16px">${dept} units</div>
+    <div class="unit-grid" id="unitGrid"></div>`;
+  popupSetBody(wrap.outerHTML, () => {
+    const grid = document.getElementById('unitGrid');
+    units.forEach((u) => {
+      const rows = rowsWithLinks(u.stats);
+      const uScore = computeUnitScore(u.stats);
+      const badge = scoreClass(uScore);
+
+      const card = document.createElement('article');
+      card.className = 'card';
+      card.innerHTML = `
+        <div class="unit-title">
+          ${u.unit || '(unit)'}
+          <div class="unit-score">
+            <div class="sv">${fmt1(uScore)}<small>/20</small></div>
+            <div class="sb ${badge.cls}">${badge.text}</div>
+          </div>
+        </div>
+        <div class="body"></div>
+        <div class="unit-updated">Updated ${fmtTime(u.stats.updatedAt)}</div>
+      `;
+      const bodyEl = card.querySelector('.body');
+
+      const unitLinks = rows.map(r => r.link).filter(Boolean);
+
+      rows.forEach((r) => {
+        const row = document.createElement('div');
+        const clickable = !!r.link;
+        row.className = 'kv' + (clickable ? ' clickable' : '');
+        row.innerHTML = `
+          <div class="key">${r.key}</div>
+          <div class="val" title="${r.val}">${r.val}</div>
+        `;
+        if (clickable) {
+          row.addEventListener('click', () => {
+            const startIdx = Math.max(0, unitLinks.indexOf(r.link));
+            renderFileViewerInPopup(unitLinks, startIdx, `${dept} ${u.unit}`, () => {
+              renderUnitsInPopup(dept, units);
+              popupSetTitle(`${dept} details`);
+            });
+          });
+        }
+        bodyEl.appendChild(row);
+      });
+
+      grid.appendChild(card);
+    });
+  });
+  popupSetTitle(`${dept} details`);
+}
+
+/* Render the file viewer inside the same popup with Back and prev or next */
+function renderFileViewerInPopup(files, startIndex, titlePrefix, onBack){
+  const safeFiles = files.filter(x => x && x.trim());
+  if (!safeFiles.length) return;
+  let idx = Math.max(0, Math.min(startIndex || 0, safeFiles.length - 1));
+
+  const html = `
+    <div class="bar">
+      <div style="display:flex;gap:8px;align-items:center">
+        <button id="backBtn" class="navbtn">Back</button>
+        <button id="navPrev" class="navbtn">Prev</button>
+        <button id="navNext" class="navbtn">Next</button>
+      </div>
+      <div class="filetitle" id="fileTitle"></div>
+    </div>
+    <div style="width:100%;height:calc(100% - 44px);padding:0;margin:0;">
+      <iframe id="fileFrame" src="" style="border:0;width:100%;height:100%;"></iframe>
+    </div>
+  `;
+
+  function setFrame(){
+    const url = safeFiles[idx];
+    const title = `${titlePrefix} | ${idx+1} of ${safeFiles.length}`;
+    popupSetTitle(title);
+    const frame = document.getElementById('fileFrame');
+    const t = document.getElementById('fileTitle');
+    if (frame) frame.src = url;
+    if (t) t.textContent = url;
+    const prevBtn = document.getElementById('navPrev');
+    const nextBtn = document.getElementById('navNext');
+    if (prevBtn) prevBtn.disabled = idx === 0;
+    if (nextBtn) nextBtn.disabled = idx === safeFiles.length - 1;
+  }
+
+  popupSetBody(html, () => {
+    document.getElementById('backBtn').addEventListener('click', () => {
+      if (typeof onBack === 'function') onBack();
+    });
+    document.getElementById('navPrev').addEventListener('click', () => { if (idx>0) { idx--; setFrame(); } });
+    document.getElementById('navNext').addEventListener('click', () => { if (idx<safeFiles.length-1) { idx++; setFrame(); } });
+    setFrame();
+  });
+}
+
+/* Open the popup and render units view. File viewer will reuse this popup */
+function openUnitsPopup(dept, units){
+  w2popup.open({
+    title: `${dept} details`,
+    width: Math.min(window.innerWidth*0.95, 1280),
+    height: Math.min(window.innerHeight*0.95, 860),
+    showMax: true,
+    modal: true,
+    body: '<div class="popup-wrap"></div>',
+    onOpen(evt){
+      evt.onComplete = () => {
+        renderUnitsInPopup(dept, units);
+      };
+    }
+  });
+}
+
+/* ==================== Render first level cards with score ==================== */
+const gridEl = document.getElementById('grid');
+const qEl = document.getElementById('q');
+
+const groups = buildGroups(data);
+const orderedDepts = Array.from(groups.keys());
+
+function render(){
+  const query = (qEl.value || '').trim().toLowerCase();
+  gridEl.innerHTML = '';
+
+  for (const dept of orderedDepts) {
+    if (query && !dept.toLowerCase().includes(query)) continue;
+
+    const units = groups.get(dept) || [];
+    const now = new Date();
+    const updatedCount = units.reduce((acc, u) => {
+      const t = Date.parse(u.stats.updatedAt || '');
+      if (!isNaN(t) && daysDiff(now, t) <= 7.0) acc++;
+      return acc;
+    }, 0);
+
+    // Scores
+    const unitScores = units.map(u => computeUnitScore(u.stats));
+    const avgScore = unitScores.length ? unitScores.reduce((a,b)=>a+b,0)/unitScores.length : 0;
+    const avgScoreClamped = Number(fmt1(clamp(avgScore, 0, 20)));
+    const sClass = scoreClass(avgScoreClamped);
+
+    // Representative unit for last three rows
+    const rep = pickRepresentative(units);
+    const repRows = rowsWithLinks(rep.stats);
+    const lastThree = repRows.slice(-3);
+    const lastThreeLinks = lastThree.map(r => r.link).filter(Boolean);
+
+    const card = document.createElement('article');
+    card.className = 'card';
+    card.setAttribute('role','listitem');
+    card.innerHTML = `
+      <div class="dept" title="${dept}">${dept}</div>
+      <div class="scoreWrap">
+        <div class="scoreVal">${fmt1(avgScoreClamped)}<small>/20</small></div>
+        <div class="scoreBadge ${sClass.cls}">${sClass.text}</div>
+      </div>
+      <div class="meta">
+        <span class="badge">Units: ${units.length}</span>
+        <span class="badge">Rep unit: ${rep.unit || '(unit)'}</span>
+      </div>
+      <div class="body"></div>
+      <div class="footer">
+        <button class="navbtn" id="open-${dept}">Open units</button>
+        <span>Rep updated ${fmtTime(rep.stats.updatedAt)}</span>
+      </div>
+    `;
+
+    const body = card.querySelector('.body');
+
+    const row1 = document.createElement('div');
+    row1.className = 'kv';
+    row1.innerHTML = `
+      <div class="key">Units updated last 7 days</div>
+      <div class="val">${updatedCount}</div>
+    `;
+    body.appendChild(row1);
+
+    lastThree.forEach((r) => {
+      const row = document.createElement('div');
+      const clickable = !!r.link;
+      row.className = 'kv' + (clickable ? ' clickable' : '');
+      row.innerHTML = `
+        <div class="key">${r.key}</div>
+        <div class="val" title="${r.val}">${r.val}</div>
+      `;
+      if (clickable) {
+        row.addEventListener('click', () => {
+          w2popup.open({
+            title: `${dept} ${rep.unit}`,
+            width: Math.min(window.innerWidth*0.9, 1200),
+            height: Math.min(window.innerHeight*0.9, 800),
+            showMax: true,
+            modal: true,
+            body: '<div class="popup-wrap"></div>',
+            onOpen(e){
+              e.onComplete = () => {
+                renderFileViewerInPopup(
+                  lastThreeLinks,
+                  Math.max(0, lastThreeLinks.indexOf(r.link)),
+                  `${dept} ${rep.unit}`,
+                  () => { w2popup.close(); }
+                );
+              };
+            }
+          });
+        });
+      }
+      body.appendChild(row);
+    });
+
+    card.querySelector(`#open-${CSS.escape(dept)}`).addEventListener('click', () => openUnitsPopup(dept, units));
+
+    gridEl.appendChild(card);
+  }
+
+  if (!gridEl.children.length) {
+    const empty = document.createElement('div');
+    empty.style.color = 'var(--muted)';
+    empty.textContent = 'No departments match your search';
+    gridEl.appendChild(empty);
+  }
+}
+
+qEl.addEventListener('input', render);
+render();
+
+/* Example: to load real JSON preserving order from server
+fetch('/api/summary')
+  .then(r => r.json())
+  .then(obj => { Object.assign(data, obj); const g = buildGroups(data); orderedDepts.length = 0; orderedDepts.push(...g.keys()); render(); })
+  .catch(console.error);
+*/
+</script>
+</body>
+</html>
