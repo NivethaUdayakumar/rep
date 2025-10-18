@@ -33,7 +33,6 @@
     .meta{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
     .badge{font-size:11px;font-weight:700;border:1px solid var(--line);border-radius:999px;padding:2px 8px;color:var(--muted);background:#f8fafc}
 
-    /* Score styles */
     .scoreWrap{position:absolute;top:12px;right:12px;display:flex;flex-direction:column;align-items:flex-end;gap:4px}
     .scoreVal{font-weight:900;font-size:28px;line-height:1}
     .scoreVal small{font-size:12px;color:var(--muted);margin-left:2px}
@@ -85,7 +84,6 @@
 Each fX maps by position to the corresponding data row position.
 ============================================================== */
 
-/* Replace this with your real data load if needed */
 const data = window.summaryData || {
   "dept1_unit1":{
     "a":"A1","b":"B1","c":"C1","d":"D1","e":"E1","f":"F1",
@@ -135,13 +133,7 @@ function rowsWithLinks(stats){
   return out;
 }
 
-/* Scoring
-   Based on remaining fields only, not fX keys, not updatedAt.
-   Completeness: fraction of non empty values
-   Freshness: small bonus for recent updates
-   Error hints: penalty if values include error words
-   Result scaled to 0..20 and clamped
-*/
+/* Scoring */
 function computeUnitScore(stats){
   const keys = Object.keys(stats).filter(k => k !== 'updatedAt' && !/^f\d+$/i.test(k));
   const n = keys.length;
@@ -156,9 +148,9 @@ function computeUnitScore(stats){
     const v = stats[k];
     const s = v == null ? '' : String(v).trim();
     if (s && s.toLowerCase() !== 'na' && s.toLowerCase() !== 'n/a') filled++;
-    if (errRx.test(s)) penalty += 0.2; // simple penalty per hit
+    if (errRx.test(s)) penalty += 0.2;
   }
-  penalty = Math.min(penalty, 0.6); // cap penalty
+  penalty = Math.min(penalty, 0.6);
 
   const completeness = filled / n;
 
@@ -174,14 +166,13 @@ function computeUnitScore(stats){
   let score20 = clamp(score01 * 20, 0, 20);
   return Number(fmt1(score20));
 }
-
 function scoreClass(score){
   if (score >= 14) return { text:'Good', cls:'scoreGood' };
   if (score >= 10) return { text:'Fair', cls:'scoreFair' };
   return { text:'Poor', cls:'scorePoor' };
 }
 
-/* Build groups: dept -> list of units in insertion order */
+/* Build groups by dept */
 function buildGroups(obj){
   const groups = new Map();
   for (const [k, v] of Object.entries(obj)) {
@@ -192,7 +183,7 @@ function buildGroups(obj){
   return groups;
 }
 
-/* Pick representative unit for first level last three rows: most recent updatedAt, fallback first */
+/* Pick representative unit by most recent updatedAt */
 function pickRepresentative(units){
   let best = null, bestTime = -Infinity;
   for (const u of units) {
@@ -202,7 +193,7 @@ function pickRepresentative(units){
   return best || units[0];
 }
 
-/* ==================== Popup body render helpers ==================== */
+/* ==================== Popup helpers ==================== */
 function popupSetTitle(text){
   if (window.w2popup && typeof w2popup.title === 'function') w2popup.title(text);
   else {
@@ -218,8 +209,10 @@ function popupSetBody(html, onReady){
   }
 }
 
-/* Render the unit cards inside the already open popup */
-function renderUnitsInPopup(dept, units){
+/* Render unit cards inside the already open popup
+   hideKeys is a Set of keys that should be excluded from unit rows
+*/
+function renderUnitsInPopup(dept, units, hideKeys){
   const wrap = document.createElement('div');
   wrap.className = 'popup-wrap';
   wrap.innerHTML = `<div style="margin-bottom:10px;font-weight:800;font-size:16px">${dept} units</div>
@@ -227,7 +220,9 @@ function renderUnitsInPopup(dept, units){
   popupSetBody(wrap.outerHTML, () => {
     const grid = document.getElementById('unitGrid');
     units.forEach((u) => {
-      const rows = rowsWithLinks(u.stats);
+      const allRows = rowsWithLinks(u.stats);
+      const rows = allRows.filter(r => !hideKeys.has(r.key));
+
       const uScore = computeUnitScore(u.stats);
       const badge = scoreClass(uScore);
 
@@ -260,7 +255,7 @@ function renderUnitsInPopup(dept, units){
           row.addEventListener('click', () => {
             const startIdx = Math.max(0, unitLinks.indexOf(r.link));
             renderFileViewerInPopup(unitLinks, startIdx, `${dept} ${u.unit}`, () => {
-              renderUnitsInPopup(dept, units);
+              renderUnitsInPopup(dept, units, hideKeys);
               popupSetTitle(`${dept} details`);
             });
           });
@@ -274,7 +269,7 @@ function renderUnitsInPopup(dept, units){
   popupSetTitle(`${dept} details`);
 }
 
-/* Render the file viewer inside the same popup with Back and prev or next */
+/* File viewer inside the same popup with Back and Prev or Next */
 function renderFileViewerInPopup(files, startIndex, titlePrefix, onBack){
   const safeFiles = files.filter(x => x && x.trim());
   if (!safeFiles.length) return;
@@ -318,8 +313,8 @@ function renderFileViewerInPopup(files, startIndex, titlePrefix, onBack){
   });
 }
 
-/* Open the popup and render units view. File viewer will reuse this popup */
-function openUnitsPopup(dept, units){
+/* Open the popup and render units, passing the hideKeys set */
+function openUnitsPopup(dept, units, hideKeys){
   w2popup.open({
     title: `${dept} details`,
     width: Math.min(window.innerWidth*0.95, 1280),
@@ -329,13 +324,13 @@ function openUnitsPopup(dept, units){
     body: '<div class="popup-wrap"></div>',
     onOpen(evt){
       evt.onComplete = () => {
-        renderUnitsInPopup(dept, units);
+        renderUnitsInPopup(dept, units, hideKeys || new Set());
       };
     }
   });
 }
 
-/* ==================== Render first level cards with score ==================== */
+/* ==================== First level render with scoring ==================== */
 const gridEl = document.getElementById('grid');
 const qEl = document.getElementById('q');
 
@@ -357,17 +352,16 @@ function render(){
       return acc;
     }, 0);
 
-    // Scores
     const unitScores = units.map(u => computeUnitScore(u.stats));
     const avgScore = unitScores.length ? unitScores.reduce((a,b)=>a+b,0)/unitScores.length : 0;
     const avgScoreClamped = Number(fmt1(clamp(avgScore, 0, 20)));
     const sClass = scoreClass(avgScoreClamped);
 
-    // Representative unit for last three rows
     const rep = pickRepresentative(units);
     const repRows = rowsWithLinks(rep.stats);
     const lastThree = repRows.slice(-3);
     const lastThreeLinks = lastThree.map(r => r.link).filter(Boolean);
+    const lastThreeKeys = new Set(lastThree.map(r => r.key)); // keys to hide in second level
 
     const card = document.createElement('article');
     card.className = 'card';
@@ -432,7 +426,7 @@ function render(){
       body.appendChild(row);
     });
 
-    card.querySelector(`#open-${CSS.escape(dept)}`).addEventListener('click', () => openUnitsPopup(dept, units));
+    card.querySelector(`#open-${CSS.escape(dept)}`).addEventListener('click', () => openUnitsPopup(dept, units, lastThreeKeys));
 
     gridEl.appendChild(card);
   }
@@ -448,10 +442,16 @@ function render(){
 qEl.addEventListener('input', render);
 render();
 
-/* Example: to load real JSON preserving order from server
+/* Example fetch if you load real data
 fetch('/api/summary')
   .then(r => r.json())
-  .then(obj => { Object.assign(data, obj); const g = buildGroups(data); orderedDepts.length = 0; orderedDepts.push(...g.keys()); render(); })
+  .then(obj => {
+    const g = buildGroups(obj);
+    orderedDepts.length = 0;
+    orderedDepts.push(...g.keys());
+    Object.assign(data, obj);
+    render();
+  })
   .catch(console.error);
 */
 </script>
