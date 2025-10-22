@@ -86,17 +86,17 @@ Each fX maps by position to the corresponding data row position.
 
 const data = window.summaryData || {
   "dept1_unit1":{
-    "a":"11","b":"21","c":"31","d":"D1","e":"E1","f":"F1",
+    "a":"11","b":"21","c":"31","d":"ok","e":"ok","f":"ok",
     "f1":"files/a1.html","f2":"files/b1.html","f3":"files/c1.html","f4":"files/d1.html","f5":"files/e1.html","f6":"files/f1.html",
     "updatedAt": "2025-10-12T10:00:00Z"
   },
   "dept1_unit2":{
-    "a":"12","b":"22","c":"32","d":"D2","e":"E2","f":"F2",
+    "a":"12","b":"22","c":"32","d":"ok","e":"ok","f":"ok",
     "f1":"files/a2.html","f2":"files/b2.html","f3":"files/c2.html","f4":"files/d2.html","f5":"files/e2.html","f6":"files/f2.html",
     "updatedAt": "2025-10-16T09:00:00Z"
   },
   "dept2_unit1":{
-    "a":"13","b":"23","c":"33","d":"D3","e":"E3","f":"F3",
+    "x":"13","y":"23","z":"33","note":"ok","flag":"ok","meta":"ok",
     "f1":"files/a3.html","f2":"files/b3.html","f3":"files/c3.html","f4":"files/d3.html","f5":"files/e3.html","f6":"files/f3.html",
     "updatedAt": "2025-10-01T11:00:00Z"
   }
@@ -145,8 +145,11 @@ function rowsWithLinks(stats){
   return out;
 }
 
-/* Scoring */
-function computeUnitScore(stats){
+/* ============== Scoring registry per department ==============
+   Define a scorer per dept name. The function receives stats and dept.
+   Return a Number in 0..20. Fallback to '*' if dept not found.
+*/
+function computeScoreGeneric(stats){
   const keys = Object.keys(stats).filter(k => k !== 'updatedAt' && !/^f\d+$/i.test(k));
   const n = keys.length;
   if (n === 0) return 0;
@@ -174,10 +177,77 @@ function computeUnitScore(stats){
     else if (d <= 30) freshness = 0.05;
   }
 
-  let score01 = clamp(completeness - penalty + freshness, 0, 1);
-  let score20 = clamp(score01 * 20, 0, 20);
-  return Number(fmt1(score20));
+  const score01 = clamp(completeness - penalty + freshness, 0, 1);
+  return Number(fmt1(score01 * 20));
 }
+
+/* Example custom scorer for dept1
+   Heavier weight on numeric keys a b c, mild penalty if any of d e f contains non ok
+*/
+function computeScoreDept1(stats){
+  const numKeys = ['a','b','c'];
+  let numFilled = 0;
+  let numCount = 0;
+  for (const k of numKeys) {
+    if (k in stats) {
+      numCount++;
+      if (Number.isFinite(toNumber(stats[k]))) numFilled++;
+    }
+  }
+  const numerics = numCount ? numFilled / numCount : 0;
+
+  let okBonus = 0;
+  ['d','e','f'].forEach(k => {
+    if (k in stats && String(stats[k]).toLowerCase() === 'ok') okBonus += 0.03;
+  });
+  okBonus = Math.min(okBonus, 0.09);
+
+  let freshness = 0;
+  const t = Date.parse(stats.updatedAt || '');
+  if (!isNaN(t)) {
+    const d = daysDiff(new Date(), t);
+    if (d <= 7) freshness = 0.08;
+    else if (d <= 30) freshness = 0.04;
+  }
+
+  const base = 0.5 * numerics + 0.5 * computeScoreGeneric(stats) / 20;
+  const score01 = clamp(base + okBonus + freshness, 0, 1);
+  return Number(fmt1(score01 * 20));
+}
+
+/* Example custom scorer for dept2
+   Looks for numeric x y z average, small penalty if flag or note not ok
+*/
+function computeScoreDept2(stats){
+  const nums = ['x','y','z'].map(k => toNumber(stats[k])).filter(v => Number.isFinite(v));
+  const avgNorm = nums.length ? Math.min(1, Math.max(0, nums.reduce((a,b)=>a+b,0) / (nums.length * 100))) : 0;
+
+  let textPenalty = 0;
+  ['note','flag','meta'].forEach(k => {
+    if (k in stats && String(stats[k]).toLowerCase() !== 'ok') textPenalty += 0.05;
+  });
+  textPenalty = Math.min(textPenalty, 0.15);
+
+  const generic = computeScoreGeneric(stats) / 20;
+  const score01 = clamp(0.6 * generic + 0.4 * avgNorm - textPenalty, 0, 1);
+  return Number(fmt1(score01 * 20));
+}
+
+/* Registry
+   Add or replace entries here to match your real department names
+   unitScoreFns['*'] is the fallback
+*/
+const unitScoreFns = {
+  '*': computeScoreGeneric,
+  'dept1': computeScoreDept1,
+  'dept2': computeScoreDept2
+};
+
+function computeUnitScoreForDept(dept, stats){
+  const fn = unitScoreFns.hasOwnProperty(dept) ? unitScoreFns[dept] : unitScoreFns['*'];
+  return fn(stats, dept);
+}
+
 function scoreClass(score){
   if (score >= 14) return { text:'Good', cls:'scoreGood' };
   if (score >= 10) return { text:'Fair', cls:'scoreFair' };
@@ -235,7 +305,7 @@ function renderUnitsInPopup(dept, units, hideKeys){
       const allRows = rowsWithLinks(u.stats);
       const rows = allRows.filter(r => !hideKeys.has(r.key));
 
-      const uScore = computeUnitScore(u.stats);
+      const uScore = computeUnitScoreForDept(dept, u.stats);
       const badge = scoreClass(uScore);
 
       const card = document.createElement('article');
@@ -364,25 +434,25 @@ function render(){
       return acc;
     }, 0);
 
-    // Scores
-    const unitScores = units.map(u => computeUnitScore(u.stats));
+    // Unit scores use per department scorer
+    const unitScores = units.map(u => computeUnitScoreForDept(dept, u.stats));
     const avgScore = unitScores.length ? unitScores.reduce((a,b)=>a+b,0)/unitScores.length : 0;
     const avgScoreClamped = Number(fmt1(clamp(avgScore, 0, 20)));
     const sClass = scoreClass(avgScoreClamped);
 
-    // Representative unit for labeling only
+    // Representative for labels only
     const rep = pickRepresentative(units);
     const repRows = rowsWithLinks(rep.stats);
     const repLastThree = repRows.slice(-3);
 
     // Aggregate sums and links across all units for their last three positions
     const sums = [0,0,0];
-    const sumLinks = [[],[],[]]; // flattened file lists per position
-    const hideKeys = new Set(repLastThree.map(r => r.key)); // hide these in second level
+    const sumLinks = [[],[],[]];
+    const hideKeys = new Set(repLastThree.map(r => r.key));
 
     units.forEach(u => {
       const rows = rowsWithLinks(u.stats);
-      const last3 = rows.slice(-3); // position aligned by "last 3"
+      const last3 = rows.slice(-3);
       for (let i = 0; i < 3; i++) {
         const r = last3[i];
         if (!r) continue;
@@ -414,7 +484,7 @@ function render(){
 
     const body = card.querySelector('.body');
 
-    // Row 1: weekly updated count
+    // Row 1 weekly updated count
     const row1 = document.createElement('div');
     row1.className = 'kv';
     row1.innerHTML = `
@@ -423,7 +493,7 @@ function render(){
     `;
     body.appendChild(row1);
 
-    // Rows 2-4: Sums of last three fields across units, labels taken from representative's last three keys
+    // Rows 2 to 4 sums by aligned last three positions
     repLastThree.forEach((r, idx) => {
       const row = document.createElement('div');
       const linksForIdx = sumLinks[idx];
@@ -435,7 +505,6 @@ function render(){
       `;
       if (clickable) {
         row.addEventListener('click', () => {
-          // open combined files for this aggregated position
           w2popup.open({
             title: `${dept} aggregated`,
             width: Math.min(window.innerWidth*0.9, 1200),
@@ -459,7 +528,7 @@ function render(){
       body.appendChild(row);
     });
 
-    // Open second level popup, hide the three keys shown at top level
+    // Open second level popup hide those three keys
     card.querySelector(`#open-${CSS.escape(dept)}`).addEventListener('click', () => openUnitsPopup(dept, units, hideKeys));
 
     gridEl.appendChild(card);
