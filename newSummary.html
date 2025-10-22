@@ -86,17 +86,17 @@ Each fX maps by position to the corresponding data row position.
 
 const data = window.summaryData || {
   "dept1_unit1":{
-    "a":"A1","b":"B1","c":"C1","d":"D1","e":"E1","f":"F1",
+    "a":"11","b":"21","c":"31","d":"D1","e":"E1","f":"F1",
     "f1":"files/a1.html","f2":"files/b1.html","f3":"files/c1.html","f4":"files/d1.html","f5":"files/e1.html","f6":"files/f1.html",
     "updatedAt": "2025-10-12T10:00:00Z"
   },
   "dept1_unit2":{
-    "a":"A2","b":"B2","c":"C2","d":"D2","e":"E2","f":"F2",
+    "a":"12","b":"22","c":"32","d":"D2","e":"E2","f":"F2",
     "f1":"files/a2.html","f2":"files/b2.html","f3":"files/c2.html","f4":"files/d2.html","f5":"files/e2.html","f6":"files/f2.html",
     "updatedAt": "2025-10-16T09:00:00Z"
   },
   "dept2_unit1":{
-    "a":"A3","b":"B3","c":"C3","d":"D3","e":"E3","f":"F3",
+    "a":"13","b":"23","c":"33","d":"D3","e":"E3","f":"F3",
     "f1":"files/a3.html","f2":"files/b3.html","f3":"files/c3.html","f4":"files/d3.html","f5":"files/e3.html","f6":"files/f3.html",
     "updatedAt": "2025-10-01T11:00:00Z"
   }
@@ -105,12 +105,24 @@ const data = window.summaryData || {
 /* ==================== Helpers ==================== */
 function clamp(v, lo, hi){ return Math.max(lo, Math.min(hi, v)); }
 function fmt1(n){ return (Math.round(n*10)/10).toFixed(1); }
+function fmtNum(n){
+  const v = Number(n);
+  return Number.isFinite(v) ? v.toLocaleString() : String(n);
+}
 function fmtTime(iso){ if(!iso) return 'NA'; const d=new Date(iso); return d.toLocaleString(undefined,{year:'numeric',month:'short',day:'2-digit',hour:'2-digit',minute:'2-digit'}); }
 function daysDiff(a,b){ return Math.abs((a-b)/(1000*60*60*24)); }
 function splitKey(k){
   const idx = k.indexOf('_');
   if (idx < 0) return { dept:k, unit:'' };
   return { dept:k.slice(0, idx), unit:k.slice(idx+1) };
+}
+
+/* Parse first numeric token from a string like 1,234 or 45.6ms */
+function toNumber(x){
+  if (x == null) return NaN;
+  const s = String(x).replace(/,/g,'');
+  const m = s.match(/-?\d+(\.\d+)?/);
+  return m ? parseFloat(m[0]) : NaN;
 }
 
 /* Extract ordered data rows and matching links for a single unit object */
@@ -330,7 +342,7 @@ function openUnitsPopup(dept, units, hideKeys){
   });
 }
 
-/* ==================== First level render with scoring ==================== */
+/* ==================== First level render with sums and scoring ==================== */
 const gridEl = document.getElementById('grid');
 const qEl = document.getElementById('q');
 
@@ -352,16 +364,33 @@ function render(){
       return acc;
     }, 0);
 
+    // Scores
     const unitScores = units.map(u => computeUnitScore(u.stats));
     const avgScore = unitScores.length ? unitScores.reduce((a,b)=>a+b,0)/unitScores.length : 0;
     const avgScoreClamped = Number(fmt1(clamp(avgScore, 0, 20)));
     const sClass = scoreClass(avgScoreClamped);
 
+    // Representative unit for labeling only
     const rep = pickRepresentative(units);
     const repRows = rowsWithLinks(rep.stats);
-    const lastThree = repRows.slice(-3);
-    const lastThreeLinks = lastThree.map(r => r.link).filter(Boolean);
-    const lastThreeKeys = new Set(lastThree.map(r => r.key)); // keys to hide in second level
+    const repLastThree = repRows.slice(-3);
+
+    // Aggregate sums and links across all units for their last three positions
+    const sums = [0,0,0];
+    const sumLinks = [[],[],[]]; // flattened file lists per position
+    const hideKeys = new Set(repLastThree.map(r => r.key)); // hide these in second level
+
+    units.forEach(u => {
+      const rows = rowsWithLinks(u.stats);
+      const last3 = rows.slice(-3); // position aligned by "last 3"
+      for (let i = 0; i < 3; i++) {
+        const r = last3[i];
+        if (!r) continue;
+        const num = toNumber(r.val);
+        if (Number.isFinite(num)) sums[i] += num;
+        if (r.link) sumLinks[i].push(r.link);
+      }
+    });
 
     const card = document.createElement('article');
     card.className = 'card';
@@ -385,6 +414,7 @@ function render(){
 
     const body = card.querySelector('.body');
 
+    // Row 1: weekly updated count
     const row1 = document.createElement('div');
     row1.className = 'kv';
     row1.innerHTML = `
@@ -393,18 +423,21 @@ function render(){
     `;
     body.appendChild(row1);
 
-    lastThree.forEach((r) => {
+    // Rows 2-4: Sums of last three fields across units, labels taken from representative's last three keys
+    repLastThree.forEach((r, idx) => {
       const row = document.createElement('div');
-      const clickable = !!r.link;
+      const linksForIdx = sumLinks[idx];
+      const clickable = linksForIdx.length > 0;
       row.className = 'kv' + (clickable ? ' clickable' : '');
       row.innerHTML = `
-        <div class="key">${r.key}</div>
-        <div class="val" title="${r.val}">${r.val}</div>
+        <div class="key">Sum of ${r.key}</div>
+        <div class="val" title="${sums[idx]}">${fmtNum(sums[idx])}</div>
       `;
       if (clickable) {
         row.addEventListener('click', () => {
+          // open combined files for this aggregated position
           w2popup.open({
-            title: `${dept} ${rep.unit}`,
+            title: `${dept} aggregated`,
             width: Math.min(window.innerWidth*0.9, 1200),
             height: Math.min(window.innerHeight*0.9, 800),
             showMax: true,
@@ -413,9 +446,9 @@ function render(){
             onOpen(e){
               e.onComplete = () => {
                 renderFileViewerInPopup(
-                  lastThreeLinks,
-                  Math.max(0, lastThreeLinks.indexOf(r.link)),
-                  `${dept} ${rep.unit}`,
+                  linksForIdx,
+                  0,
+                  `${dept} ${r.key}`,
                   () => { w2popup.close(); }
                 );
               };
@@ -426,7 +459,8 @@ function render(){
       body.appendChild(row);
     });
 
-    card.querySelector(`#open-${CSS.escape(dept)}`).addEventListener('click', () => openUnitsPopup(dept, units, lastThreeKeys));
+    // Open second level popup, hide the three keys shown at top level
+    card.querySelector(`#open-${CSS.escape(dept)}`).addEventListener('click', () => openUnitsPopup(dept, units, hideKeys));
 
     gridEl.appendChild(card);
   }
