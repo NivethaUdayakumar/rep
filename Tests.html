@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>w2ui Popup File Viewer — standalone</title>
+  <!-- Adjust these two paths to your local copies of w2ui 2.x -->
+  <link rel="stylesheet" href="./w2ui-2.0.min.css" />
+  <script src="./w2ui-2.0.min.js"></script>
+
+  <style>
+    html, body { height: 100%; margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Arial, sans-serif; }
+    .app { padding: 16px; max-width: 1100px; margin: 0 auto; }
+    .app h1 { font-size: 20px; margin: 0 0 12px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
+    .card { border: 1px solid #e5e7eb; border-radius: 12px; padding: 12px; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.05); }
+    .card button { width: 100%; padding: 8px 10px; border-radius: 10px; border: 1px solid #d1d5db; background: #f9fafb; cursor: pointer; }
+    .card button:hover { background: #f3f4f6; }
+
+    /* Popup body container */
+    .viewer-wrap { position: absolute; inset: 0; display: grid; grid-template-rows: auto 1fr; overflow: hidden; }
+    .viewer-toolbar { padding: 8px 10px; border-bottom: 1px solid #e5e7eb; background: #fafafa; display: flex; gap: 8px; align-items: center; }
+    .viewer-toolbar .meta { margin-left: auto; font-size: 12px; color: #6b7280; }
+    .viewer-body { overflow: auto; padding: 0; }
+
+    /* Renderers */
+    .viewer-pre { white-space: pre; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; padding: 12px; line-height: 1.4; }
+    .viewer-img { display: block; max-width: 100%; height: auto; margin: 0 auto; }
+    .viewer-iframe { width: 100%; height: 100%; border: 0; }
+    .viewer-embed { width: 100%; height: 100%; border: 0; }
+
+    /* CSV table */
+    table.viewer-csv { border-collapse: collapse; width: 100%; font-size: 13px; }
+    table.viewer-csv thead th { position: sticky; top: 0; background: #f8fafc; z-index: 1; }
+    table.viewer-csv th, table.viewer-csv td { border: 1px solid #e5e7eb; padding: 6px 8px; text-align: left; }
+    table.viewer-csv tr:nth-child(even) td { background: #fcfcfd; }
+
+    .badge { display: inline-block; padding: 2px 8px; font-size: 12px; border-radius: 999px; border: 1px solid #e5e7eb; background: #fff; }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <h1>w2ui popup file viewer</h1>
+    <p>Call <code>openFile(path)</code> from your app or click a demo. Replace demo files with yours.</p>
+
+    <div class="grid">
+      <div class="card">
+        <div>Image GIF</div>
+        <button onclick="openFile('./demo/demo.gif')">Open demo.gif</button>
+      </div>
+      <div class="card">
+        <div>CSV</div>
+        <button onclick="openFile('./demo/sample.csv')">Open sample.csv</button>
+      </div>
+      <div class="card">
+        <div>Text RPT</div>
+        <button onclick="openFile('./demo/report.rpt')">Open report.rpt</button>
+      </div>
+      <div class="card">
+        <div>HTML</div>
+        <button onclick="openFile('./demo/example.html')">Open example.html</button>
+      </div>
+      <div class="card">
+        <div>PDF</div>
+        <button onclick="openFile('./demo/example.pdf')">Open example.pdf</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // Public entry
+    async function openFile(url) {
+      const info = await headOrProbe(url).catch(() => ({}));
+      const mime = info.contentType || guessMime(url);
+      const size = info.contentLength || undefined;
+
+      w2popup.open({
+        title: `Viewer` ,
+        width: 1000,
+        height: 720,
+        showMax: true,
+        body: `<div class="viewer-wrap">
+                 <div class="viewer-toolbar">
+                   <button class="w2ui-btn" onclick="window.downloadCurrentFile()">Download</button>
+                   <button class="w2ui-btn" onclick="window.copyLinkCurrentFile()">Copy link</button>
+                   <span class="meta" id="viewer-meta"></span>
+                 </div>
+                 <div class="viewer-body" id="viewer-body"></div>
+               </div>`,
+        onOpen(evt) {
+          evt.onComplete = async () => {
+            try {
+              window.__currentViewUrl = url;
+              document.getElementById('viewer-meta').textContent = `${mime}${size ? `  •  ${formatBytes(size)}` : ''}`;
+              await renderByType(url, mime);
+            } catch (e) {
+              showError(e);
+            }
+          };
+        }
+      });
+    }
+
+    // Renderers per type
+    async function renderByType(url, mime) {
+      const el = document.getElementById('viewer-body');
+      w2popup.lock('Loading', true);
+      try {
+        if (mime.startsWith('image/')) {
+          el.innerHTML = `<img class="viewer-img" alt="image"/>`;
+          const img = el.querySelector('img');
+          img.src = url;
+        } else if (mime === 'text/csv' || url.endsWith('.csv')) {
+          const text = await fetchText(url);
+          const table = csvToTable(text);
+          el.innerHTML = '';
+          el.appendChild(table);
+        } else if (mime.startsWith('text/') || looksLikeText(url)) {
+          const text = await fetchText(url);
+          const safe = escapeHTML(text);
+          el.innerHTML = `<pre class="viewer-pre">${safe}</pre>`;
+        } else if (mime === 'text/html' || url.match(/\.html?$/i)) {
+          el.innerHTML = `<iframe class="viewer-iframe" sandbox="allow-same-origin allow-forms allow-scripts"></iframe>`;
+          el.querySelector('iframe').src = url;
+        } else if (mime === 'application/pdf' || url.endsWith('.pdf')) {
+          el.innerHTML = `<embed class="viewer-embed" type="application/pdf" src="${url}">`;
+        } else {
+          // Fallback try as text then as download hint
+          try {
+            const text = await fetchText(url);
+            const safe = escapeHTML(text);
+            el.innerHTML = `<pre class="viewer-pre">${safe}</pre>`;
+          } catch {
+            el.innerHTML = `<div style="padding:12px">This file type is not previewable here. <a href="${url}" download>Download</a></div>`;
+          }
+        }
+      } finally {
+        w2popup.unlock();
+      }
+    }
+
+    // Utilities
+    async function headOrProbe(url) {
+      // Try HEAD to get content type and length
+      try {
+        const res = await fetch(url, { method: 'HEAD' });
+        if (!res.ok) throw new Error('HEAD not ok');
+        const contentType = res.headers.get('Content-Type') || '';
+        const contentLength = parseInt(res.headers.get('Content-Length') || '0', 10) || undefined;
+        return { contentType, contentLength };
+      } catch {
+        // Fallback small GET
+        const res = await fetch(url, { method: 'GET' });
+        if (!res.ok) throw new Error('Fetch failed');
+        const contentType = res.headers.get('Content-Type') || '';
+        const blob = await res.blob();
+        return { contentType, contentLength: blob.size };
+      }
+    }
+
+    function guessMime(url) {
+      const ext = (url.split('?')[0].split('#')[0].split('.').pop() || '').toLowerCase();
+      const map = {
+        'gif': 'image/gif', 'png': 'image/png', 'jpg': 'image/jpeg', 'jpeg': 'image/jpeg', 'webp': 'image/webp',
+        'csv': 'text/csv', 'txt': 'text/plain', 'rpt': 'text/plain', 'log': 'text/plain',
+        'html': 'text/html', 'htm': 'text/html',
+        'pdf': 'application/pdf'
+      };
+      return map[ext] || 'application/octet-stream';
+    }
+
+    function looksLikeText(url) {
+      return /\.(txt|rpt|log|cfg|ini|md|json|xml)$/i.test(url);
+    }
+
+    async function fetchText(url) {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`Failed to fetch ${url}`);
+      return await res.text();
+    }
+
+    function escapeHTML(s) {
+      return s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    }
+
+    function formatBytes(num) {
+      if (!num) return '';
+      const units = ['B', 'KB', 'MB', 'GB'];
+      let i = 0; let n = num;
+      while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+      return `${n.toFixed(n >= 1024 ? 1 : 0)} ${units[i]}`;
+    }
+
+    // Simple CSV parser that handles quoted fields and newlines in quotes
+    function parseCSV(text) {
+      const rows = [];
+      let cur = '';
+      let row = [];
+      let q = false; // inside quotes
+      for (let i = 0; i < text.length; i++) {
+        const ch = text[i];
+        if (q) {
+          if (ch === '"') {
+            if (text[i + 1] === '"') { cur += '"'; i++; } else { q = false; }
+          } else { cur += ch; }
+        } else {
+          if (ch === '"') { q = true; }
+          else if (ch === ',') { row.push(cur); cur = ''; }
+          else if (ch === '\n') { row.push(cur); rows.push(row); row = []; cur = ''; }
+          else if (ch === '\r') { /* ignore */ }
+          else { cur += ch; }
+        }
+      }
+      // push last
+      if (cur.length || row.length) { row.push(cur); rows.push(row); }
+      return rows;
+    }
+
+    function csvToTable(csvText) {
+      const data = parseCSV(csvText);
+      const table = document.createElement('table');
+      table.className = 'viewer-csv';
+      if (!data.length) return table;
+      const thead = document.createElement('thead');
+      const htr = document.createElement('tr');
+      data[0].forEach(h => {
+        const th = document.createElement('th');
+        th.textContent = h || '';
+        htr.appendChild(th);
+      });
+      thead.appendChild(htr);
+      table.appendChild(thead);
+
+      const tbody = document.createElement('tbody');
+      for (let r = 1; r < data.length; r++) {
+        const tr = document.createElement('tr');
+        data[r].forEach(cell => {
+          const td = document.createElement('td');
+          td.textContent = cell || '';
+          tr.appendChild(td);
+        });
+        tbody.appendChild(tr);
+      }
+      table.appendChild(tbody);
+      return table;
+    }
+
+    function showError(e) {
+      const el = document.getElementById('viewer-body');
+      if (el) el.innerHTML = `<div style="padding:12px;color:#b91c1c">${escapeHTML(String(e))}</div>`;
+    }
+
+    // Toolbar helpers
+    window.downloadCurrentFile = function () {
+      const url = window.__currentViewUrl; if (!url) return;
+      const a = document.createElement('a'); a.href = url; a.download = '';
+      document.body.appendChild(a); a.click(); a.remove();
+    };
+    window.copyLinkCurrentFile = async function () {
+      const url = window.__currentViewUrl; if (!url) return;
+      try { await navigator.clipboard.writeText(new URL(url, location.href).href); w2alert('Link copied'); }
+      catch { w2alert('Copy failed'); }
+    };
+  </script>
+</body>
+</html>
