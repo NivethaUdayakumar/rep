@@ -1,27 +1,6 @@
-// multiDrilldown.js (Rules by level + filetype + event + range, includes shell runner)
-// Features kept and extended:
-// - Tokenized drilldown (a*/b*/c*/...)
-// - Breadcrumbs + Back/Forward
-// - HTML or CSV steps and general file previews
-// - Promote button on main grid and POST /api/promote with f1,f2,... from eN tokens
-// - Right click copy to clipboard on main and popup
-// - Default search presets on main and per popup level per triggering main column
-// - New defColumn rule format per main column:
-//   defColumn = {
-//     0: [
-//       { level:1, filetype:"csv",  event:"row", fileformat:"filepatternL1", range:"0-22,25,28" },
-//       { level:1, filetype:"csv",  event:"col", fileformat:"filepatternL1", range:"0-3" },
-//       { level:2, filetype:"csv",  event:"row", fileformat:"filepatternL2", range:"" },
-//       { level:3, filetype:"html", event:"row", fileformat:"filepatternL3", range:"22-63" },
-//       { level:2, filetype:"shell",event:"row", fileformat:"logs/a0.txt",   range:"10-20",
-//         commands: [
-//           'pkill -f "ttyd" || true',
-//           'ttyd -p 7681 gvim {filename}'
-//         ]}
-//     ],
-//     1: [...],
-//     7: [...]
-//   }
+// multiDrilldown.js
+// Rules by level + filetype + event + range, includes shell runner
+// Applies all matching rules per level rather than only the first one
 
 import { TableBuilder } from './tableBuilder.js';
 
@@ -33,7 +12,7 @@ export class MultiDrilldown {
     groupByIdx = [],
     statusIdx = null,
     colorColsIdx = [],
-    defColumn = {},          // New structure: { colIdx: [ {level,filetype,event,fileformat,range,commands?}, ... ] }
+    defColumn = {},          // { colIdx: [ {level,filetype,event,fileformat,range,commands?}, ... ] }
     promoteIdx = null,
     promoteCheck = [],
     promoteData = [],
@@ -61,7 +40,7 @@ export class MultiDrilldown {
     this.defaultSearches = defaultSearches || {};
 
     this._openOnce = false;
-    this._stack = [];   // [{ step, rules, ruleUsed, contexts, title, triggerCol }]
+    this._stack = [];   // [{ step, rules, rulesUsed[], contexts, title, triggerCol }]
     this._idx = -1;
     this._level0Fields = [];
   }
@@ -69,11 +48,10 @@ export class MultiDrilldown {
   /* ======================= PUBLIC ======================= */
   async init() {
     if (!window.w2ui || !window.w2popup) {
-      this.warn('w2ui/w2popup not found; include w2ui before this module.');
+      this.warn('w2ui or w2popup not found. Include w2ui before this module.');
       return;
     }
 
-    // Build main grid
     const tb = new TableBuilder({
       dataCsv: this.csv,
       box: this.container,
@@ -89,21 +67,17 @@ export class MultiDrilldown {
 
     this._level0Fields = grid.columns.map(c => c.field);
 
-    // Right click copy on MAIN grid
     this._enableRightClickCopy(this.name);
 
-    // Promote on MAIN only for parent rows
     if (Number.isInteger(this.promoteIdx) &&
         this.promoteIdx >= 0 && this.promoteIdx < grid.columns.length) {
       this._setupPromoteOnMainGrid(grid);
     }
 
-    // Presets on MAIN toolbar
     this._ensureToolbar(grid);
     this._installToolbarPreset(grid, this.defaultSearches?.main || [], `${grid.name}-preset`);
     this._applyPresetList(grid, this.defaultSearches?.main || [], true);
 
-    // Drilldown from MAIN using rule table
     grid.on('click', async (ev) => {
       const col = ev.detail?.column ?? ev.column;
       const recid = ev.detail?.recid ?? ev.recid;
@@ -125,21 +99,21 @@ export class MultiDrilldown {
       if (!rec) return;
 
       const rowIndex = this._rowIndexOf(grid, recid);
-      const rule = this._pickRule({
+      const rulesL1 = this._pickRules({
         rules,
         level: 1,
-        event: 'row',
         rowIndex,
         colIndex: col
       });
-      if (!rule) return;
+
+      if (!rulesL1.length) return;
 
       const mainCtx = this._valuesFromRecord(rec, this._level0Fields);
       const title = grid.columns[col]?.text || grid.columns[col]?.caption || `Col ${col}`;
 
       await this._openSequence({
         rules,
-        startRule: rule,
+        startRules: rulesL1,
         contexts: [mainCtx],
         title,
         triggerCol: col
@@ -222,33 +196,33 @@ export class MultiDrilldown {
   }
 
   /* ======================= RULED SEQUENCE NAV ======================= */
-  async _openSequence({ rules, startRule, contexts, title, triggerCol }) {
-    await this._ensurePopup(title, this._crumbsFor({ step: 0, rules, ruleUsed: startRule, contexts }));
-    await this._renderStep({ step: 0, rules, ruleUsed: startRule, contexts, title, triggerCol }, false);
-    this._stack = [{ step: 0, rules, ruleUsed: startRule, contexts, title, triggerCol }];
+  async _openSequence({ rules, startRules, contexts, title, triggerCol }) {
+    await this._ensurePopup(title, this._crumbsFor({ step: 0, rules, rulesUsed: startRules, contexts }));
+    await this._renderStep({ step: 0, rules, rulesUsed: startRules, contexts, title, triggerCol }, false);
+    this._stack = [{ step: 0, rules, rulesUsed: startRules, contexts, title, triggerCol }];
     this._idx = 0;
     this._updateNavButtons();
   }
 
   async _advance({ current, rowCtx, clickColIndex, clickRowIndex }) {
     const nextStep = current.step + 1;
-    const nextLevel = nextStep + 1; // level 1 is step 0
+    const nextLevel = nextStep + 1;
     const nextRules = current.rules;
 
-    const rule = this._pickRule({
+    const rulesNext = this._pickRules({
       rules: nextRules,
       level: nextLevel,
-      event: 'row',    // default to row, adjusted below in selection
       rowIndex: clickRowIndex,
       colIndex: clickColIndex
-    }, true); // allow both row and col match
-    if (!rule) return;
+    });
+
+    if (!rulesNext.length) return;
 
     const nextContexts = [...current.contexts, rowCtx];
     const nextState = {
       step: nextStep,
       rules: nextRules,
-      ruleUsed: rule,
+      rulesUsed: rulesNext,
       contexts: nextContexts,
       title: current.title,
       triggerCol: current.triggerCol
@@ -271,53 +245,112 @@ export class MultiDrilldown {
     this._updateNavButtons();
   }
 
-  /* ======================= RENDER ONE STEP FROM A RULE ======================= */
+  /* ======================= RENDER ONE STEP WITH MULTIPLE RULES ======================= */
   async _renderStep(state, replaceForward = false, noWire = false) {
-    const { step, ruleUsed, contexts } = state;
-    if (!ruleUsed) return;
-    const url = this._resolvePattern(ruleUsed.fileformat, contexts);
+    const { step, rulesUsed, contexts } = state;
+    if (!Array.isArray(rulesUsed) || !rulesUsed.length) return;
 
-    this._replaceBody(`<div id="dd-body-inner" style="height:100%;"></div>`);
+    this._replaceBody(`<div id="dd-body-inner" style="height:100%;overflow:auto;"></div>`);
+    const host = document.getElementById('dd-body-inner');
+    if (!host) return;
 
-    if (String(ruleUsed.filetype).toLowerCase() === 'shell') {
-      await this._runShellWithFile(url, ruleUsed.commands);
-      this._setCrumbs(this._crumbsFor(state, url));
-      document.getElementById('dd-body-inner').innerHTML =
-        `<div style="padding:12px;">Shell command sent for <code>${this._esc(url)}</code></div>`;
+    // Cleanup old dd grids
+    this._destroyDDGrids();
+
+    // Container per rule
+    const containers = [];
+    rulesUsed.forEach((rule, idx) => {
+      const rid = `dd-view-${step}-${idx}`;
+      const header = `
+        <div class="dd-view-header" style="padding:6px 8px;border-bottom:1px solid #e5e7eb;background:#fafafa;">
+          <span style="font-weight:600;">Level ${step + 1} • ${this._esc(String(rule.filetype || '').toUpperCase())}</span>
+          <span style="opacity:.7;margin-left:8px;">${this._esc(this._basename(this._resolvePattern(rule.fileformat, contexts)))}</span>
+        </div>`;
+      const body = `<div id="${rid}" class="dd-view-body" style="min-height:220px;"></div>`;
+      const card = document.createElement('div');
+      card.className = 'dd-view';
+      card.style.border = '1px solid #e5e7eb';
+      card.style.borderRadius = '8px';
+      card.style.margin = '8px';
+      card.style.overflow = 'hidden';
+      card.innerHTML = header + body;
+      host.appendChild(card);
+      containers.push({ rule, rid, idx });
+    });
+
+    // Render each viewer sequentially
+    for (const { rule, rid, idx } of containers) {
+      await this._renderOneViewer({
+        state,
+        rule,
+        containerId: rid,
+        viewerIndex: idx,
+        noWire
+      });
+    }
+
+    // Update crumbs based on the first rule
+    const firstUrl = this._resolvePattern(rulesUsed[0].fileformat, contexts);
+    this._setCrumbs(this._crumbsFor(state, firstUrl));
+
+    // Resize hook for all dd grids
+    w2popup.on?.('resize', () => {
+      Object.keys(w2ui).forEach(k => {
+        if (k.startsWith('ddGrid_')) {
+          const g = w2ui[k];
+          try { g?.resize(); } catch {}
+        }
+      });
+    });
+  }
+
+  async _renderOneViewer({ state, rule, containerId, viewerIndex, noWire }) {
+    const { step, contexts } = state;
+    const url = this._resolvePattern(rule.fileformat, contexts);
+    const container = document.getElementById(containerId);
+    if (!container) return;
+
+    const type = String(rule.filetype || '').toLowerCase();
+    if (type === 'shell') {
+      await this._runShellWithFile(url, rule.commands);
+      container.innerHTML = `<div style="padding:12px;">Shell command sent for <code>${this._esc(url)}</code></div>`;
+      return;
+    }
+
+    if (!(await this._exists(url))) {
+      container.innerHTML = `<div style="padding:12px;color:#b91c1c;">File not found: ${this._esc(url)}</div>`;
       return;
     }
 
     const ext = this._extFromUrl(url);
 
-    if (['csv','tsv'].includes(ext)) {
-      if (!(await this._exists(url))) return this._missing(url);
-      const innerId = 'dd-grid';
-      document.getElementById('dd-body-inner').innerHTML = `<div id="${innerId}" style="height:520px;"></div>`;
+    if (['csv','tsv'].includes(ext) || type === 'csv') {
+      const gname = `ddGrid_${step}_${viewerIndex}`;
+      container.innerHTML = `<div id="${gname}_box" style="height:520px;"></div>`;
       await this._raf2();
 
-      if (w2ui.ddGrid) try { w2ui.ddGrid.destroy(); } catch {}
-      const tb = new TableBuilder({ dataCsv: url, box: `#${innerId}`, name: 'ddGrid' });
+      if (w2ui[gname]) try { w2ui[gname].destroy(); } catch {}
+      const tb = new TableBuilder({ dataCsv: url, box: `#${gname}_box`, name: gname });
       await tb.build();
-      try { w2ui.ddGrid?.resize(); } catch {}
+      try { w2ui[gname]?.resize(); } catch {}
 
-      this._enableRightClickCopy('ddGrid');
+      this._enableRightClickCopy(gname);
 
-      const dd = w2ui.ddGrid;
+      const dd = w2ui[gname];
       this._ensureToolbar(dd);
       const presets = this._searchPresetsFor(state);
-      this._installToolbarPreset(dd, presets, `ddGrid-preset`);
+      this._installToolbarPreset(dd, presets, `${gname}-preset`);
       this._applyPresetList(dd, presets, true);
 
       if (!noWire) {
-        const grid = w2ui.ddGrid;
-        grid.on('click', async (ev) => {
+        dd.on('click', async (ev) => {
           const recid = ev.detail?.recid ?? ev.recid;
           const colIndex = ev.detail?.column ?? ev.column;
-          const rec = grid.get(recid);
+          const rec = dd.get(recid);
           if (!rec) return;
-          const fields = grid.columns.map(c => c.field);
+          const fields = dd.columns.map(c => c.field);
           const rowCtx = this._valuesFromRecord(rec, fields);
-          const rowIndex = this._rowIndexOf(grid, recid);
+          const rowIndex = this._rowIndexOf(dd, recid);
           await this._advance({
             current: state,
             rowCtx,
@@ -326,106 +359,85 @@ export class MultiDrilldown {
           });
         });
       }
-
-      this._setCrumbs(this._crumbsFor(state, url));
       return;
     }
 
-    // HTML or general file preview
-    if (!(await this._exists(url))) return this._missing(url);
-
-    const body = document.getElementById('dd-body-inner');
-    const lower = ext;
-
-    if (['html','htm','pdf'].includes(lower)) {
-      body.innerHTML = `
+    if (['html','htm','pdf'].includes(ext) || type === 'html') {
+      container.innerHTML = `
         <div style="height:100%;display:flex;flex-direction:column;">
           <div style="flex:1 1 auto;min-height:420px;">
             <iframe src="${this._esc(url)}" title="preview" style="border:0;width:100%;height:100%;"></iframe>
           </div>
         </div>`;
-      this._setCrumbs(this._crumbsFor(state, url));
       return;
     }
 
-    if (['png','jpg','jpeg','gif','bmp','webp','svg'].includes(lower)) {
-      body.innerHTML = `
+    if (['png','jpg','jpeg','gif','bmp','webp','svg'].includes(ext) || ['png','jpg','jpeg','gif','bmp','webp','svg'].includes(type)) {
+      container.innerHTML = `
         <div style="height:100%;display:flex;align-items:center;justify-content:center;padding:8px;overflow:auto;">
           <img src="${this._esc(url)}" alt="image" style="max-width:100%;max-height:100%;object-fit:contain;">
         </div>`;
-      this._setCrumbs(this._crumbsFor(state, url));
       return;
     }
 
-    if (['mp4','webm','ogg'].includes(lower)) {
-      body.innerHTML = `
+    if (['mp4','webm','ogg'].includes(ext) || ['mp4','webm','ogg'].includes(type)) {
+      container.innerHTML = `
         <div style="height:100%;display:flex;align-items:center;justify-content:center;padding:8px;">
           <video src="${this._esc(url)}" controls style="max-width:100%;max-height:100%;"></video>
         </div>`;
-      this._setCrumbs(this._crumbsFor(state, url));
       return;
     }
 
-    if (['mp3','wav','flac','m4a','aac','oga'].includes(lower)) {
-      body.innerHTML = `
+    if (['mp3','wav','flac','m4a','aac','oga'].includes(ext) || ['mp3','wav','flac','m4a','aac','oga'].includes(type)) {
+      container.innerHTML = `
         <div style="height:100%;display:flex;align-items:center;justify-content:center;padding:8px;">
           <audio src="${this._esc(url)}" controls></audio>
         </div>`;
-      this._setCrumbs(this._crumbsFor(state, url));
       return;
     }
 
-    // Fallback
-    body.innerHTML = `
+    container.innerHTML = `
       <div style="padding:12px;display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
         <a href="${this._esc(url)}" target="_blank" class="w2ui-btn">Open file</a>
         <div style="flex:1 1 100%;">
           <iframe src="${this._esc(url)}" title="preview" style="border:0;width:100%;height:60vh;"></iframe>
         </div>
       </div>`;
-    this._setCrumbs(this._crumbsFor(state, url));
   }
 
   /* ======================= RULE PICKING AND RANGES ======================= */
-  _pickRule({ rules, level, event, rowIndex, colIndex }, allowEitherEvent = false) {
-    if (!Array.isArray(rules)) return null;
+  _pickRules({ rules, level, rowIndex, colIndex }) {
+    if (!Array.isArray(rules)) return [];
     const cand = rules.filter(r => Number(r?.level) === Number(level));
-    if (!cand.length) return null;
+    if (!cand.length) return [];
 
-    const check = (r) => {
-      const ev = String(r.event || '').toLowerCase();
-      if (!allowEitherEvent && ev !== String(event).toLowerCase()) return false;
-
-      const rtype = String(r.range || '').trim();
-      const parsed = this._parseRange(rtype);
-      if (ev === 'row') {
-        return parsed.all || parsed.set.has(Number(rowIndex));
-      } else if (ev === 'col') {
-        return parsed.all || parsed.set.has(Number(colIndex));
-      } else {
-        return false;
-      }
+    const parsedCache = new Map();
+    const parse = (spec) => {
+      if (!parsedCache.has(spec)) parsedCache.set(spec, this._parseRange(spec));
+      return parsedCache.get(spec);
     };
 
-    // If allowEitherEvent, try match with row then col
-    if (allowEitherEvent) {
-      let byRow = cand.find(r => String(r.event).toLowerCase() === 'row' && check(r));
-      if (byRow) return byRow;
-      let byCol = cand.find(r => String(r.event).toLowerCase() === 'col' && check(r));
-      if (byCol) return byCol;
-      // if ranges are empty and no index provided, fall back to any with empty range
-      let anyAll = cand.find(r => String(r.range || '') === '');
-      if (anyAll) return anyAll;
-      return null;
+    const out = [];
+    for (const r of cand) {
+      const ev = String(r.event || '').toLowerCase();
+      const rangeSpec = String(r.range || '').trim();
+      const pr = parse(rangeSpec);
+
+      if (ev === 'row') {
+        if (pr.all) { out.push(r); continue; }
+        if (Number.isInteger(rowIndex) && pr.set.has(Number(rowIndex))) { out.push(r); continue; }
+      } else if (ev === 'col') {
+        if (pr.all) { out.push(r); continue; }
+        if (Number.isInteger(colIndex) && pr.set.has(Number(colIndex))) { out.push(r); continue; }
+      }
     }
 
-    // Normal strict event match
-    for (const r of cand) {
-      if (check(r)) return r;
+    // If nothing matched but there are any rules with empty range treat them as match all for this level
+    if (!out.length) {
+      const anyAll = cand.filter(r => String(r.range || '') === '');
+      return anyAll;
     }
-    // fallback if any rule has empty range for this event
-    return cand.find(r => String(r.event || '').toLowerCase() === String(event).toLowerCase()
-                       && String(r.range || '') === '') || null;
+    return out;
   }
 
   _parseRange(spec) {
@@ -480,8 +492,12 @@ export class MultiDrilldown {
       document.getElementById('dd-fwd') ?.addEventListener('click', () => this._go(+1));
       this._openOnce = true;
       w2popup.on?.('resize', () => {
-        const g = w2ui.ddGrid;
-        if (g && g.box && w2popup.body && w2popup.body.contains(g.box)) { try { g.resize(); } catch {} }
+        Object.keys(w2ui).forEach(k => {
+          if (k.startsWith('ddGrid_')) {
+            const g = w2ui[k];
+            try { g?.resize(); } catch {}
+          }
+        });
       });
     } else {
       w2popup.title?.(title);
@@ -739,7 +755,15 @@ export class MultiDrilldown {
     this._openOnce = false;
     this._stack = [];
     this._idx = -1;
-    if (w2ui.ddGrid) try { w2ui.ddGrid.destroy(); } catch {}
+    this._destroyDDGrids();
+  }
+
+  _destroyDDGrids() {
+    Object.keys(w2ui).forEach(k => {
+      if (k.startsWith('ddGrid_')) {
+        try { w2ui[k].destroy(); } catch {}
+      }
+    });
   }
 
   _updateNavButtons() {
@@ -761,7 +785,7 @@ export class MultiDrilldown {
 
   _missing(url) { w2alert(`File not found:\n${url}`); }
   _basename(p){ return (p.split('/').pop() || p); }
-  _esc(s){ return String(s ?? '').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'gt;','"':'&quot;',"'":'&#39;'}[c])); }
+  _esc(s){ return String(s ?? '').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
   _safeJoin(arr){ return arr.map(v => String(v ?? '').replace(/[^\w\-]+/g,'_')).join(this.sep); }
   _extFromUrl(u){ const m = String(u||'').toLowerCase().match(/\.([a-z0-9]+)(?:\?|#|$)/); return m ? m[1] : ''; }
 
