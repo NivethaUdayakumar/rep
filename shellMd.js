@@ -1,6 +1,6 @@
 // multiDrilldown.js
 // Rules by level + filetype + event + range, includes shell runner
-// Applies all matching rules per level rather than only the first one
+// Applies all matching rules per level, with strict event + range matching
 
 import { TableBuilder } from './tableBuilder.js';
 
@@ -78,11 +78,13 @@ export class MultiDrilldown {
     this._installToolbarPreset(grid, this.defaultSearches?.main || [], `${grid.name}-preset`);
     this._applyPresetList(grid, this.defaultSearches?.main || [], true);
 
+    // Main grid click
     grid.on('click', async (ev) => {
       const col = ev.detail?.column ?? ev.column;
       const recid = ev.detail?.recid ?? ev.recid;
       if (col == null || recid == null) return;
 
+      // Promote button
       if (Number.isInteger(this.promoteIdx) && col === this.promoteIdx) {
         const oe = ev.detail?.originalEvent || ev.originalEvent;
         const target = oe?.target || window.event?.target;
@@ -99,11 +101,12 @@ export class MultiDrilldown {
       if (!rec) return;
 
       const rowIndex = this._rowIndexOf(grid, recid);
+      // Level 1 selection
       const rulesL1 = this._pickRules({
         rules,
         level: 1,
-        rowIndex,
-        colIndex: col
+        clickRowIndex: rowIndex,
+        clickColIndex: col
       });
 
       if (!rulesL1.length) return;
@@ -212,8 +215,8 @@ export class MultiDrilldown {
     const rulesNext = this._pickRules({
       rules: nextRules,
       level: nextLevel,
-      rowIndex: clickRowIndex,
-      colIndex: clickColIndex
+      clickRowIndex,
+      clickColIndex
     });
 
     if (!rulesNext.length) return;
@@ -254,10 +257,8 @@ export class MultiDrilldown {
     const host = document.getElementById('dd-body-inner');
     if (!host) return;
 
-    // Cleanup old dd grids
     this._destroyDDGrids();
 
-    // Container per rule
     const containers = [];
     rulesUsed.forEach((rule, idx) => {
       const rid = `dd-view-${step}-${idx}`;
@@ -278,7 +279,6 @@ export class MultiDrilldown {
       containers.push({ rule, rid, idx });
     });
 
-    // Render each viewer sequentially
     for (const { rule, rid, idx } of containers) {
       await this._renderOneViewer({
         state,
@@ -289,11 +289,9 @@ export class MultiDrilldown {
       });
     }
 
-    // Update crumbs based on the first rule
     const firstUrl = this._resolvePattern(rulesUsed[0].fileformat, contexts);
     this._setCrumbs(this._crumbsFor(state, firstUrl));
 
-    // Resize hook for all dd grids
     w2popup.on?.('resize', () => {
       Object.keys(w2ui).forEach(k => {
         if (k.startsWith('ddGrid_')) {
@@ -406,37 +404,39 @@ export class MultiDrilldown {
   }
 
   /* ======================= RULE PICKING AND RANGES ======================= */
-  _pickRules({ rules, level, rowIndex, colIndex }) {
+  _pickRules({ rules, level, clickRowIndex, clickColIndex }) {
     if (!Array.isArray(rules)) return [];
-    const cand = rules.filter(r => Number(r?.level) === Number(level));
-    if (!cand.length) return [];
+    const sameLevel = rules.filter(r => Number(r?.level) === Number(level));
+    if (!sameLevel.length) return [];
 
-    const parsedCache = new Map();
+    // Parse once per distinct string
+    const cache = new Map();
     const parse = (spec) => {
-      if (!parsedCache.has(spec)) parsedCache.set(spec, this._parseRange(spec));
-      return parsedCache.get(spec);
+      const key = String(spec ?? '');
+      if (!cache.has(key)) cache.set(key, this._parseRange(key));
+      return cache.get(key);
     };
 
     const out = [];
-    for (const r of cand) {
+    for (const r of sameLevel) {
       const ev = String(r.event || '').toLowerCase();
       const rangeSpec = String(r.range || '').trim();
       const pr = parse(rangeSpec);
 
       if (ev === 'row') {
-        if (pr.all) { out.push(r); continue; }
-        if (Number.isInteger(rowIndex) && pr.set.has(Number(rowIndex))) { out.push(r); continue; }
+        // must have a row index and be inside the range or the rule's own range is empty which means all
+        if (!Number.isInteger(clickRowIndex) || clickRowIndex < 0) continue;
+        if (pr.all || pr.set.has(clickRowIndex)) out.push(r);
       } else if (ev === 'col') {
-        if (pr.all) { out.push(r); continue; }
-        if (Number.isInteger(colIndex) && pr.set.has(Number(colIndex))) { out.push(r); continue; }
+        if (!Number.isInteger(clickColIndex) || clickColIndex < 0) continue;
+        if (pr.all || pr.set.has(clickColIndex)) out.push(r);
+      } else {
+        // unknown event, skip
+        continue;
       }
     }
 
-    // If nothing matched but there are any rules with empty range treat them as match all for this level
-    if (!out.length) {
-      const anyAll = cand.filter(r => String(r.range || '') === '');
-      return anyAll;
-    }
+    // No global fallback here. If nothing matched, nothing runs.
     return out;
   }
 
@@ -444,16 +444,18 @@ export class MultiDrilldown {
     const out = { all: false, set: new Set() };
     const s = String(spec || '').trim();
     if (!s) { out.all = true; return out; }
-    for (const part of s.split(',').map(x => x.trim()).filter(Boolean)) {
+    for (const partRaw of s.split(',')) {
+      const part = partRaw.trim();
+      if (!part) continue;
       const m = part.match(/^(\d+)\s*-\s*(\d+)$/);
       if (m) {
         const a = Number(m[1]), b = Number(m[2]);
         const lo = Math.min(a, b), hi = Math.max(a, b);
         for (let i = lo; i <= hi; i++) out.set.add(i);
-        continue;
+      } else {
+        const n = Number(part);
+        if (!Number.isNaN(n)) out.set.add(n);
       }
-      const n = Number(part);
-      if (!Number.isNaN(n)) out.set.add(n);
     }
     return out;
   }
@@ -790,6 +792,7 @@ export class MultiDrilldown {
   _extFromUrl(u){ const m = String(u||'').toLowerCase().match(/\.([a-z0-9]+)(?:\?|#|$)/); return m ? m[1] : ''; }
 
   _rowIndexOf(grid, recid) {
+    // Use visible order index
     const recs = grid.records || [];
     for (let i = 0; i < recs.length; i++) {
       if (String(recs[i].recid) === String(recid)) return i;
