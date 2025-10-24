@@ -1,6 +1,7 @@
 // multiDrilldown.js
 // Rules by level + filetype + event + range, includes shell runner
-// Applies all matching rules per level, with strict event + range matching
+// Applies all matching rules per level, strict event + range matching
+// Shell filename comes from the selected cell value
 
 import { TableBuilder } from './tableBuilder.js';
 
@@ -40,7 +41,9 @@ export class MultiDrilldown {
     this.defaultSearches = defaultSearches || {};
 
     this._openOnce = false;
-    this._stack = [];   // [{ step, rules, rulesUsed[], contexts, title, triggerCol }]
+    // stack item shape:
+    // { step, rules, rulesUsed[], contexts, title, triggerCol, selectionValue }
+    this._stack = [];
     this._idx = -1;
     this._level0Fields = [];
   }
@@ -101,7 +104,6 @@ export class MultiDrilldown {
       if (!rec) return;
 
       const rowIndex = this._rowIndexOf(grid, recid);
-      // Level 1 selection
       const rulesL1 = this._pickRules({
         rules,
         level: 1,
@@ -111,6 +113,10 @@ export class MultiDrilldown {
 
       if (!rulesL1.length) return;
 
+      // selected cell value from main grid
+      const fields = grid.columns.map(c => c.field);
+      const selectionValue = rec[fields[col]];
+
       const mainCtx = this._valuesFromRecord(rec, this._level0Fields);
       const title = grid.columns[col]?.text || grid.columns[col]?.caption || `Col ${col}`;
 
@@ -119,7 +125,8 @@ export class MultiDrilldown {
         startRules: rulesL1,
         contexts: [mainCtx],
         title,
-        triggerCol: col
+        triggerCol: col,
+        selectionValue
       });
     });
   }
@@ -199,15 +206,15 @@ export class MultiDrilldown {
   }
 
   /* ======================= RULED SEQUENCE NAV ======================= */
-  async _openSequence({ rules, startRules, contexts, title, triggerCol }) {
+  async _openSequence({ rules, startRules, contexts, title, triggerCol, selectionValue }) {
     await this._ensurePopup(title, this._crumbsFor({ step: 0, rules, rulesUsed: startRules, contexts }));
-    await this._renderStep({ step: 0, rules, rulesUsed: startRules, contexts, title, triggerCol }, false);
-    this._stack = [{ step: 0, rules, rulesUsed: startRules, contexts, title, triggerCol }];
+    await this._renderStep({ step: 0, rules, rulesUsed: startRules, contexts, title, triggerCol, selectionValue }, false);
+    this._stack = [{ step: 0, rules, rulesUsed: startRules, contexts, title, triggerCol, selectionValue }];
     this._idx = 0;
     this._updateNavButtons();
   }
 
-  async _advance({ current, rowCtx, clickColIndex, clickRowIndex }) {
+  async _advance({ current, rowCtx, clickColIndex, clickRowIndex, clickedCellValue }) {
     const nextStep = current.step + 1;
     const nextLevel = nextStep + 1;
     const nextRules = current.rules;
@@ -228,7 +235,8 @@ export class MultiDrilldown {
       rulesUsed: rulesNext,
       contexts: nextContexts,
       title: current.title,
-      triggerCol: current.triggerCol
+      triggerCol: current.triggerCol,
+      selectionValue: clickedCellValue // propagate the newest selected cell value
     };
 
     await this._renderStep(nextState, true);
@@ -303,15 +311,18 @@ export class MultiDrilldown {
   }
 
   async _renderOneViewer({ state, rule, containerId, viewerIndex, noWire }) {
-    const { step, contexts } = state;
+    const { step, contexts, selectionValue } = state;
     const url = this._resolvePattern(rule.fileformat, contexts);
     const container = document.getElementById(containerId);
     if (!container) return;
 
     const type = String(rule.filetype || '').toLowerCase();
+
     if (type === 'shell') {
-      await this._runShellWithFile(url, rule.commands);
-      container.innerHTML = `<div style="padding:12px;">Shell command sent for <code>${this._esc(url)}</code></div>`;
+      // filename comes from the selected cell value
+      const filename = String(selectionValue ?? '').trim() || url;
+      await this._runShellWithFile(filename, rule.commands);
+      container.innerHTML = `<div style="padding:12px;">Shell command sent for <code>${this._esc(filename)}</code></div>`;
       return;
     }
 
@@ -346,14 +357,18 @@ export class MultiDrilldown {
           const colIndex = ev.detail?.column ?? ev.column;
           const rec = dd.get(recid);
           if (!rec) return;
+
           const fields = dd.columns.map(c => c.field);
           const rowCtx = this._valuesFromRecord(rec, fields);
           const rowIndex = this._rowIndexOf(dd, recid);
+          const clickedCellValue = rec[fields[colIndex]];
+
           await this._advance({
             current: state,
             rowCtx,
             clickColIndex: colIndex,
-            clickRowIndex: rowIndex
+            clickRowIndex: rowIndex,
+            clickedCellValue
           });
         });
       }
@@ -424,19 +439,16 @@ export class MultiDrilldown {
       const pr = parse(rangeSpec);
 
       if (ev === 'row') {
-        // must have a row index and be inside the range or the rule's own range is empty which means all
         if (!Number.isInteger(clickRowIndex) || clickRowIndex < 0) continue;
         if (pr.all || pr.set.has(clickRowIndex)) out.push(r);
       } else if (ev === 'col') {
         if (!Number.isInteger(clickColIndex) || clickColIndex < 0) continue;
         if (pr.all || pr.set.has(clickColIndex)) out.push(r);
       } else {
-        // unknown event, skip
         continue;
       }
     }
 
-    // No global fallback here. If nothing matched, nothing runs.
     return out;
   }
 
@@ -792,7 +804,6 @@ export class MultiDrilldown {
   _extFromUrl(u){ const m = String(u||'').toLowerCase().match(/\.([a-z0-9]+)(?:\?|#|$)/); return m ? m[1] : ''; }
 
   _rowIndexOf(grid, recid) {
-    // Use visible order index
     const recs = grid.records || [];
     for (let i = 0; i < recs.length; i++) {
       if (String(recs[i].recid) === String(recid)) return i;
