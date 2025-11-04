@@ -1,0 +1,65 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Main grid inside w2ui popup</title>
+    <link rel="stylesheet" href="https://unpkg.com/w2ui@2.0/dist/w2ui.min.css">
+    <style>
+      html, body { height: 100%; margin: 0; }
+    </style>
+  </head>
+  <body>
+    <div style="padding:12px">
+      <button class="w2ui-btn" id="open">Open main grid in popup</button>
+    </div>
+
+    <script src="https://unpkg.com/w2ui@2.0/dist/w2ui.min.js"></script>
+    <script type="module">
+      import { MultiDrilldown } from './multiDrilldown.js';
+
+      let md;  // keep a reference so you can reuse or clean up if needed
+
+      const csvUrl = '/data/main.csv';  // same origin to avoid CORS
+
+      // You can leave this empty if you only want the main grid
+      const defColumn = {
+        // 2: [{ level: 1, event: 'col', range: '0-999', filetype: 'csv', fileformat: 'a0/file.csv' }]
+      };
+
+      document.getElementById('open').addEventListener('click', () => {
+        w2popup.open({
+          title: 'Main table',
+          body: '<div id="host" style="height:100%"></div>',
+          showMax: true,
+          width: 1100,
+          height: 720,
+          onOpen(evt) {
+            evt.onComplete = async () => {
+              md = new MultiDrilldown({
+                container: '#host',      // render the main grid here
+                name: 'mainGrid',
+                csv: csvUrl,
+                defColumn,               // optional
+                groupByIdx: [],
+                statusIdx: null,
+                colorColsIdx: [],
+                defaultSearches: { main: [] }
+              });
+              await md.init();
+
+              // make the grid responsive when the popup resizes
+              w2popup.on('resize', () => {
+                const g = w2ui['mainGrid'];
+                try { g && g.resize(); } catch {}
+              });
+            };
+          },
+          onClose() {
+            // clean up the main grid instance living inside the popup
+            try { w2ui['mainGrid']?.destroy(); } catch {}
+          }
+        });
+      });
+    </script>
+  </body>
+</html>
