@@ -1,0 +1,53 @@
+import concurrent.futures as cf
+import time
+from pathlib import Path
+
+def process_one_file(path):
+    """
+    Your IO heavy work here.
+    Replace sleep with real IO like read or parse.
+    Raise for file-specific failures only.
+    """
+    time.sleep(0.3)  # simulate slow IO
+    size = path.stat().st_size
+    return {"file": str(path), "size": size, "status": "ok"}
+
+def discover_files(root, pattern="*.log"):
+    return [p for p in Path(root).rglob(pattern) if p.is_file()]
+
+def run_parallel(files, max_workers=32):
+    """
+    Returns (successes, failures)
+    successes: list of dicts from process_one_file
+    failures: list of dicts with file and error
+    """
+    successes = []
+    failures = []
+    with cf.ThreadPoolExecutor(max_workers=max_workers) as ex:
+        future_to_path = {ex.submit(process_one_file, p): p for p in files}
+        for fut in cf.as_completed(future_to_path):
+            p = future_to_path[fut]
+            try:
+                res = fut.result()
+                successes.append(res)
+            except Exception as e:
+                failures.append({"file": str(p), "status": "error", "error": repr(e)})
+    return successes, failures
+
+if __name__ == "__main__":
+    root = Path("logs")
+    root.mkdir(exist_ok=True)
+    if not any(root.iterdir()):
+        for i in range(10):
+            f = root / f"demo_{i}.log"
+            f.write_text("hello\n" * (i + 1))
+
+    files = discover_files(root, "*.log")
+    ok, bad = run_parallel(files, max_workers=64)  # tune workers for IO
+
+    print("Success count:", len(ok))
+    print("Failure count:", len(bad))
+    for r in ok[:3]:
+        print("OK sample:", r)
+    for r in bad[:3]:
+        print("ERR sample:", r)
