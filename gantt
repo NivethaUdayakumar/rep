@@ -1,0 +1,540 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Schedule Tracker — Standalone</title>
+  <style>
+    :root {
+      --bg: #ffffff;
+      --panel: #ffffff;
+      --muted: #475569;
+      --text: #0f172a;
+      --accent: #16a34a;
+      --grid: #e5e7eb;
+      --bar: #3b82f6;
+      --today: #ef4444;
+      --labelw: 260px;
+      --rowh: 38px;
+      --unitw: 52px; /* JS will update per scale */
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; background: var(--bg); color: var(--text);
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Arial;
+      overflow: auto;
+    }
+    header {
+      padding: 16px 20px; background: var(--panel); border-bottom: 1px solid var(--grid);
+      display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+    }
+    header h1 { font-size: 18px; margin: 0; font-weight: 700; }
+    .hint { color: var(--muted); font-size: 13px; }
+
+    .wrap {
+      display: grid; grid-template-columns: 360px 1fr; gap: 12px; padding: 12px;
+    }
+
+    .card { background: var(--panel); border: 1px solid var(--grid); border-radius: 12px; }
+    .card h2 { margin: 0 0 12px; font-size: 16px; }
+    .card .body { padding: 14px; }
+
+    form .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px; }
+    form label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+    input[type="text"], input[type="date"], select {
+      width: 100%; padding: 10px; background: #ffffff; border: 1px solid var(--grid); border-radius: 8px; color: var(--text); outline: none;
+    }
+    .btns { display: flex; gap: 8px; flex-wrap: wrap; }
+    button { cursor: pointer; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--grid); background: #ffffff; color: var(--text); }
+    button.primary { background: var(--accent); border-color: #16a34a; color: #08130b; font-weight: 700; }
+    button.ghost { background: transparent; }
+
+    .toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .toolbar .seg { border: 1px solid var(--grid); border-radius: 8px; overflow: hidden; display: inline-flex; }
+    .toolbar .seg button { border: 0; background: transparent; padding: 8px 12px; font-size: 13px; color: var(--muted); }
+    .toolbar .seg button.active { background: #ffffff; color: var(--text); }
+
+    /* Gantt */
+    .gantt{ display: grid; grid-template-rows: auto 1fr; height: 70vh; min-height: 420px; }
+    /* Header: left Task cell fixed, timeline ticks slide with scroll */
+    .gantt-header{ position: sticky; top: 0; background: var(--panel); z-index: 3; height: 44px; border-bottom: 1px solid var(--grid); overflow: hidden; }
+    .gantt-header .task-head{
+      position: absolute; left: 0; top: 0; bottom: 0; width: var(--labelw);
+      padding: 8px; font-size: 12px; color: var(--muted); display:flex; align-items:center;
+      background: var(--panel); border-right:1px solid var(--grid); font-weight:600;
+    }
+    .gantt-header .tick-rail{ position: absolute; left: var(--labelw); right: 0; top: 0; bottom: 0; overflow: hidden; }
+    .gantt-header .tick-track{ position: absolute; top: 0; bottom: 0; display: flex; will-change: transform; }
+    .gantt-header .hcell{
+      min-width: var(--unitw); max-width: var(--unitw);
+      border-left: 1px solid var(--grid); padding: 4px 4px;
+      font-size: 12px; color: var(--muted); line-height: 1.15; text-align: center; white-space: normal;
+    }
+
+    /* Body: fixed label rail + scrollable timeline */
+    .gantt-body{ position: relative; overflow: hidden; }
+    .gantt-labels{
+      position: absolute; left: 0; top: 0; bottom: 0; width: var(--labelw);
+      background: linear-gradient(90deg, var(--panel) 70%, transparent);
+      border-right: 1px solid var(--grid); overflow: hidden; z-index: 2;
+    }
+    .gantt-label{
+      height: var(--rowh); display: flex; align-items: center;
+      padding: 8px 8px; color: var(--text);
+    }
+    .gantt-label .sub{ color: var(--muted); font-size: 12px; }
+
+    .gantt-timeline{
+      position: absolute; left: var(--labelw); right: 0; top: 0; bottom: 0;
+      overflow: auto; z-index: 1; background: #fff;
+    }
+
+    .gantt-grid{
+      position: absolute; left: 0; top: 0;
+    }
+    .gantt-grid .vline{
+      position: absolute; top: 0; bottom: 0; width: 1px; background: var(--grid);
+    }
+    .gantt-grid .hline{
+      position: absolute; left: 0; right: 0; height: 1px; background: var(--grid);
+    }
+
+    .gantt-rows{ position: relative; }
+    .gantt-row{
+      position: relative; height: var(--rowh); /* no border; we draw horizontal grid lines instead */
+    }
+
+    .bar{
+      position: absolute; top: 7px; height: 24px; background: var(--bar);
+      border: 1px solid rgba(0,0,0,.08); border-radius: 6px; display: flex; align-items: center;
+      padding: 0 8px; gap: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 12px;
+    }
+    .bar.small{ height: 18px; font-size: 11px; }
+    .bar .id{ font-weight: 700; opacity: .9; }
+
+    .todayline{
+      position: absolute; top: 0; bottom: 0; width: 2px; background: var(--today); z-index: 4;
+    }
+
+    .footer { color: var(--muted); font-size: 12px; padding: 10px 14px; border-top: 1px solid var(--grid); }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Schedule Tracker</h1>
+    <span class="hint">Create tasks with deadlines and see them on a Gantt timeline</span>
+  </header>
+
+  <div class="wrap">
+    <!-- Left: Task form only -->
+    <section class="card">
+      <div class="body">
+        <h2>Add or edit task</h2>
+        <form id="taskForm">
+          <div class="row">
+            <div>
+              <label for="taskId">Task ID</label>
+              <input id="taskId" type="text" placeholder="T123" required />
+            </div>
+            <div>
+              <label for="taskName">Title</label>
+              <input id="taskName" type="text" placeholder="Milestone" required />
+            </div>
+          </div>
+          <div class="row">
+            <div>
+              <label for="startDate">Start date</label>
+              <input id="startDate" type="date" />
+            </div>
+            <div>
+              <label for="dueDate">Deadline</label>
+              <input id="dueDate" type="date" required />
+            </div>
+          </div>
+          <div class="row">
+            <div>
+              <label for="status">Status</label>
+              <select id="status">
+                <option value="planned">Planned</option>
+                <option value="inprogress">In progress</option>
+                <option value="done">Done</option>
+              </select>
+            </div>
+            <div>
+              <label for="color">Bar color</label>
+              <input id="color" type="color" value="#3b82f6" />
+            </div>
+          </div>
+          <div class="btns">
+            <button class="primary" type="submit">Save task</button>
+            <button type="button" id="resetBtn" class="ghost">Clear form</button>
+            <button type="button" id="exportBtn" class="ghost">Export JSON</button>
+            <button type="button" id="importBtn" class="ghost">Import JSON</button>
+          </div>
+        </form>
+      </div>
+      <div class="footer">Data is saved in your browser</div>
+    </section>
+
+    <!-- Right: Gantt -->
+    <section class="card" style="min-width: 640px;">
+      <div class="body">
+        <div class="toolbar">
+          <strong>Timeline</strong>
+          <div class="seg" id="scaleSeg">
+            <button data-scale="day" class="active">Day</button>
+            <button data-scale="week">Week</button>
+            <button data-scale="month">Month</button>
+          </div>
+          <button id="todayBtn">Jump to today</button>
+        </div>
+      </div>
+      <div class="gantt">
+        <div class="gantt-header">
+          <div class="task-head">Task</div>
+          <div class="tick-rail"><div class="tick-track" id="headerTrack"></div></div>
+        </div>
+        <div class="gantt-body">
+          <div class="gantt-labels" id="ganttLabels"></div>
+          <div class="gantt-timeline" id="ganttTimeline">
+            <div class="gantt-grid" id="ganttGrid"></div>
+            <div class="gantt-rows" id="ganttRows"></div>
+            <div class="todayline" id="todayLine" style="display:none"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    const STORAGE_KEY = 'schedule_tasks_v1';
+
+    const $ = (sel) => document.querySelector(sel);
+    const $$ = (sel) => Array.from(document.querySelectorAll(sel));
+
+    const fmt = (d) => d.toISOString().slice(0,10);
+    const parse = (s) => s ? new Date(s + 'T00:00:00') : null;
+    const addDays = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
+    const startOfWeek  = (d) => { const x = new Date(d); const wd = x.getDay(); const delta = (wd+6)%7; x.setDate(x.getDate()-delta); return new Date(x.getFullYear(), x.getMonth(), x.getDate()); };
+    const startOfMonth = (d) => new Date(d.getFullYear(), d.getMonth(), 1);
+
+    function loadTasks(){ try{ return JSON.parse(localStorage.getItem(STORAGE_KEY)) || [] } catch { return [] } }
+    function saveTasks(list){ localStorage.setItem(STORAGE_KEY, JSON.stringify(list)); }
+    function upsertTask(task){
+      const tasks = loadTasks();
+      const i = tasks.findIndex(t => t.id === task.id);
+      if (i >= 0) tasks[i] = task; else tasks.push(task);
+      saveTasks(tasks); renderGantt();
+    }
+
+    function isoWeek(date){
+      const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
+      const dayNum = d.getUTCDay() || 7;
+      d.setUTCDate(d.getUTCDate() + 4 - dayNum);
+      const yearStart = new Date(Date.UTC(d.getUTCFullYear(),0,1));
+      return Math.ceil((((d - yearStart) / 86400000) + 1) / 7);
+    }
+
+    function computeRange(tasks){
+      if (!tasks.length){
+        const today = new Date();
+        return { start: addDays(today,-7), end: addDays(today,21) };
+      }
+      let min = parse(tasks[0].start), max = parse(tasks[0].due);
+      for (const t of tasks){
+        const s = parse(t.start), e = parse(t.due);
+        if (s < min) min = s; if (e > max) max = e;
+      }
+      return { start: addDays(min,-3), end: addDays(max,3) };
+    }
+
+    // Compact labels to avoid overlap
+    function buildTicks(range, scale){
+      const out = [];
+      if (scale === 'day'){
+        for (let d = new Date(range.start); d <= range.end; d = addDays(d, 1)){
+          const top = d.toLocaleDateString(undefined, { day:'2-digit', month:'short' });
+          const bot = d.toLocaleDateString(undefined, { weekday:'short' });
+          out.push({ key: fmt(d), label: `${top}\n${bot}`, date: new Date(d) });
+        }
+      } else if (scale === 'week'){
+        let d = startOfWeek(range.start);
+        while (d <= range.end){
+          const endw = addDays(d, 6);
+          const s1 = d.toLocaleDateString(undefined, { month:'short', day:'2-digit' });
+          const s2 = endw.toLocaleDateString(undefined, { month:'short', day:'2-digit' });
+          out.push({ key: fmt(d), label: `Wk ${isoWeek(d)}\n${s1}–${s2}`, date: new Date(d) });
+          d = addDays(d, 7);
+        }
+      } else {
+        let d = startOfMonth(range.start);
+        while (d <= range.end){
+          const label = d.toLocaleString(undefined, { month:'short', year:'numeric' });
+          out.push({ key:`${d.getFullYear()}-${d.getMonth()+1}`, label, date:new Date(d) });
+          d = new Date(d.getFullYear(), d.getMonth()+1, 1);
+        }
+      }
+      return out;
+    }
+
+    let currentScale = 'day';
+
+    function renderGantt(){
+      const tasks = loadTasks();
+      const range = computeRange(tasks);
+      const ticks = buildTicks(range, currentScale);
+
+      const labels   = $('#ganttLabels');
+      const timeline = $('#ganttTimeline');
+      const gridHost = $('#ganttGrid');
+      const rowsHost = $('#ganttRows');
+      const headerTrack = $('#headerTrack');
+      const todayLine = $('#todayLine');
+
+      const unitWidth = currentScale === 'day' ? 52 : currentScale === 'week' ? 104 : 140;
+      document.documentElement.style.setProperty('--unitw', unitWidth + 'px');
+
+      /* HEADER ticks */
+      headerTrack.style.width = (ticks.length * unitWidth) + 'px';
+      headerTrack.innerHTML = ticks.map(t => `<div class="hcell">${t.label.replace(/\n/g,'<br>')}</div>`).join('');
+
+      /* GRID: clear, draw vertical + horizontal */
+      gridHost.innerHTML = '';
+      gridHost.style.width = (ticks.length * unitWidth) + 'px';
+      // vertical lines
+      for (let i=0;i<ticks.length;i++){
+        const v = document.createElement('div');
+        v.className = 'vline';
+        v.style.left = (i * unitWidth) + 'px';
+        gridHost.appendChild(v);
+      }
+
+      // rows + labels + bars
+      labels.innerHTML = '';
+      rowsHost.innerHTML = '';
+      for (const t of tasks){
+        const l = document.createElement('div');
+        l.className = 'gantt-label';
+        l.innerHTML = `<div><div><strong>${escapeHtml(t.name)}</strong></div><div class="sub">${t.id} • ${t.start} → ${t.due}</div></div>`;
+        labels.appendChild(l);
+
+        const row = document.createElement('div');
+        row.className = 'gantt-row';
+
+        const startIdx = indexForDate(ticks, parse(t.start));
+        const endIdx   = indexForDate(ticks, parse(t.due));
+        const spanUnits = Math.max(1, endIdx - startIdx + 1);
+        const left = startIdx * unitWidth + 6;
+        const width = spanUnits * unitWidth - 12;
+
+        const bar = document.createElement('div');
+        bar.className = 'bar';
+        bar.style.left = left + 'px';
+        bar.style.width= width + 'px';
+        bar.style.background = t.color || getAutoColor(t.id);
+        bar.title = `${t.name}\n${t.start} → ${t.due}`;
+        bar.innerHTML = `<span class="id">${t.id}</span> ${escapeHtml(t.name)}`;
+        if (width < 80) bar.classList.add('small');
+
+        row.appendChild(bar);
+        rowsHost.appendChild(row);
+      }
+
+      // draw horizontal lines to match every row boundary
+      const rowH = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--rowh')) || 38;
+      const totalRowsH = tasks.length * rowH;
+      gridHost.style.height = totalRowsH + 'px';
+      for (let r = 1; r <= tasks.length; r++){
+        const h = document.createElement('div');
+        h.className = 'hline';
+        h.style.top = (r * rowH) + 'px';
+        gridHost.appendChild(h);
+      }
+
+      // today line
+      const today = new Date();
+      const tIdx = indexForDate(ticks, today);
+      if (tIdx >= 0){
+        const x = tIdx * unitWidth + unitWidth * offsetWithin(ticks[tIdx], today);
+        todayLine.style.display = 'block';
+        todayLine.style.left = `calc(var(--labelw) + ${x}px)`;
+      } else {
+        todayLine.style.display = 'none';
+      }
+
+      // scroll sync: header ticks + fixed labels
+      const onScroll = () => {
+        headerTrack.style.transform = `translateX(${-timeline.scrollLeft}px)`;
+        labels.style.transform = `translateY(${-timeline.scrollTop}px)`;
+      };
+      timeline.removeEventListener('scroll', timeline._sync || (()=>{}));
+      timeline.addEventListener('scroll', onScroll);
+      timeline._sync = onScroll;
+
+      // initial scroll to today
+      requestAnimationFrame(() => {
+        if (tIdx >= 0){
+          const x = tIdx * unitWidth + unitWidth * offsetWithin(ticks[tIdx], today);
+          timeline.scrollTo({ left: Math.max(0, x - 200), behavior: 'auto' });
+        }
+        onScroll();
+      });
+    }
+
+    function indexForDate(ticks, date){
+      if (!ticks.length) return 0;
+      if (currentScale === 'day'){
+        const key = fmt(date);
+        let i = ticks.findIndex(t => t.key === key);
+        if (i < 0) i = date < ticks[0].date ? 0 : ticks.length - 1;
+        return i;
+      }
+      if (currentScale === 'week'){
+        const key = fmt(startOfWeek(date));
+        let i = ticks.findIndex(t => t.key === key);
+        if (i < 0) i = date < ticks[0].date ? 0 : ticks.length - 1;
+        return i;
+      }
+      const key = `${date.getFullYear()}-${date.getMonth()+1}`;
+      let i = ticks.findIndex(t => t.key === key);
+      if (i < 0) i = date < ticks[0].date ? 0 : ticks.length - 1;
+      return i;
+    }
+
+    function offsetWithin(tick, date){
+      if (currentScale === 'day') return 0.5;
+      if (currentScale === 'week'){
+        const start = tick.date; const diff = (date - start) / 86400000;
+        return Math.min(6, Math.max(0, diff)) / 7;
+      }
+      const start = tick.date; const end = new Date(start.getFullYear(), start.getMonth()+1, 1);
+      const total = Math.max(1, (end - start) / 86400000);
+      const diff = Math.min(end - start, Math.max(0, date - start)) / 86400000;
+      return diff / total;
+    }
+
+    function getAutoColor(id){
+      let h = 0; for (let i=0;i<id.length;i++) h = (h*31 + id.charCodeAt(i)) % 360;
+      return `hsl(${h} 70% 55%)`;
+    }
+
+    function escapeHtml(s){ return String(s).replace(/[&<>\"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+    function gatherTaskFromForm(){
+      const id = $('#taskId').value.trim();
+      const name = $('#taskName').value.trim();
+      const start = $('#startDate').value;
+      const due = $('#dueDate').value;
+      const status = $('#status').value;
+      const color = $('#color').value || '#3b82f6';
+      if (!id) throw new Error('Task ID is required');
+      if (!name) throw new Error('Title is required');
+      if (!due) throw new Error('Deadline is required');
+      let startUse = start || fmt(addDays(parse(due), -1));
+      if (parse(startUse) > parse(due)) throw new Error('Start must be before or same as deadline');
+      return { id, name, start: startUse, due, status, color };
+    }
+
+    function clearForm(){
+      $('#taskId').value = '';
+      $('#taskName').value = '';
+      $('#startDate').value = '';
+      $('#dueDate').value = '';
+      $('#status').value = 'planned';
+      $('#color').value = '#3b82f6';
+    }
+
+    // Events
+    $('#taskForm').addEventListener('submit', (e) => {
+      e.preventDefault();
+      try {
+        const task = gatherTaskFromForm();
+        const existing = loadTasks().find(t => t.id === task.id);
+        if (existing && !confirm('Task ID exists. Update it?')) return;
+        upsertTask(task);
+        clearForm();
+      } catch (err) {
+        alert(err.message || String(err));
+      }
+    });
+
+    $('#resetBtn').addEventListener('click', clearForm);
+
+    $('#exportBtn').addEventListener('click', () => {
+      const data = JSON.stringify(loadTasks(), null, 2);
+      const blob = new Blob([data], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = 'tasks.json'; a.click();
+      URL.revokeObjectURL(url);
+    });
+
+    $('#importBtn').addEventListener('click', () => {
+      const inp = document.createElement('input');
+      inp.type = 'file'; inp.accept = 'application/json';
+      inp.onchange = () => {
+        const file = inp.files[0]; if (!file) return;
+        const reader = new FileReader();
+        reader.onload = () => {
+          try{
+            const json = JSON.parse(reader.result);
+            if (!Array.isArray(json)) throw new Error('Invalid file');
+            saveTasks(json.map(sanitizeTask));
+            renderGantt();
+          }catch(err){ alert('Import failed: ' + (err.message || err)); }
+        };
+        reader.readAsText(file);
+      };
+      inp.click();
+    });
+
+    function sanitizeTask(t){
+      return {
+        id: String(t.id || '').trim(),
+        name: String(t.name || '').trim(),
+        start: t.start || t.due || fmt(new Date()),
+        due: t.due || t.start || fmt(addDays(new Date(), 1)),
+        status: ['planned','inprogress','done'].includes(t.status) ? t.status : 'planned',
+        color: t.color || getAutoColor(String(t.id || 'X'))
+      };
+    }
+
+    $('#scaleSeg').addEventListener('click', (e) => {
+      const btn = e.target.closest('button'); if (!btn) return;
+      $$('#scaleSeg button').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      currentScale = btn.dataset.scale;
+      renderGantt();
+    });
+
+    $('#todayBtn').addEventListener('click', () => {
+      const timeline = $('#ganttTimeline');
+      const tasks = loadTasks();
+      const range = computeRange(tasks);
+      const ticks = buildTicks(range, currentScale);
+      const unit = currentScale === 'day' ? 52 : currentScale === 'week' ? 104 : 140;
+      const today = new Date();
+      const idx = indexForDate(ticks, today);
+      if (idx >= 0) {
+        const x = idx * unit + unit * offsetWithin(ticks[idx], today);
+        timeline.scrollTo({ left: Math.max(0, x - 200), behavior: 'smooth' });
+      }
+    });
+
+    // Seed
+    (function seed(){
+      const tasks = loadTasks();
+      if (tasks.length){ renderGantt(); return; }
+      const today = new Date();
+      const demo = [
+        { id:'T101', name:'Kickoff',        start:fmt(addDays(today,-3)), due:fmt(addDays(today, 1)), status:'done' },
+        { id:'T102', name:'Design',         start:fmt(addDays(today, 0)), due:fmt(addDays(today, 7)), status:'inprogress' },
+        { id:'T103', name:'Implementation', start:fmt(addDays(today, 5)), due:fmt(addDays(today,20)), status:'planned' },
+        { id:'T104', name:'Testing',        start:fmt(addDays(today,18)), due:fmt(addDays(today,28)), status:'planned' }
+      ].map(t => ({...t, color: getAutoColor(t.id)}));
+      saveTasks(demo);
+      renderGantt();
+    })();
+  </script>
+</body>
+</html>
