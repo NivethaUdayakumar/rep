@@ -1,0 +1,19 @@
+import json
+
+# read JSON file
+with open("data.json", "r") as f:
+    data = json.load(f)   # data is now a Python list of dicts
+
+# example: print full list
+print(data)
+
+# example: access individual objects
+for item in data:
+    print(item)  # each item is a dict
+    # access specific fields
+    print("Name:", item["name"])
+    print("Value:", item["value"])
+//Particular
+first_name = data[0]["name"]
+//One property
+names = [item["name"] for item in data]
