@@ -1,0 +1,794 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Project Gantt Tracker</title>
+
+  <!-- Frappe Gantt CDN CSS -->
+  <link
+    rel="stylesheet"
+    href="https://cdn.jsdelivr.net/npm/frappe-gantt/dist/frappe-gantt.css"
+  />
+
+  <style>
+    :root {
+      --bg: #f3f4f6;
+      --panel: #ffffff;
+      --border: #e5e7eb;
+      --text: #0f172a;
+      --muted: #6b7280;
+      --accent: #2563eb;
+      --danger: #b91c1c;
+      --radius-lg: 12px;
+      --shadow-soft: 0 10px 25px rgba(15, 23, 42, 0.06);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background: #f3f4f6;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      color: var(--text);
+    }
+
+    header {
+      padding: 14px 22px;
+      border-bottom: 1px solid var(--border);
+      background: #ffffff;
+      display: flex;
+      align-items: baseline;
+      gap: 14px;
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }
+
+    header h1 {
+      margin: 0;
+      font-size: 18px;
+    }
+
+    header span {
+      font-size: 13px;
+      color: var(--muted);
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: minmax(320px, 360px) minmax(0, 1fr);
+      gap: 14px;
+      padding: 14px;
+      align-items: flex-start;
+    }
+
+    .card {
+      background: var(--panel);
+      border-radius: var(--radius-lg);
+      border: 1px solid rgba(148, 163, 184, 0.35);
+      box-shadow: var(--shadow-soft);
+      overflow: hidden;
+    }
+
+    .card-header {
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+
+    .card-header h2 {
+      margin: 0;
+      font-size: 15px;
+    }
+
+    .card-body {
+      padding: 14px;
+    }
+
+    .small {
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    form .field-row {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+
+    form .field {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    label {
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    input[type="text"],
+    input[type="date"],
+    input[type="number"],
+    select,
+    textarea {
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      padding: 8px 9px;
+      font-size: 13px;
+      font-family: inherit;
+      outline: none;
+      background: #ffffff;
+      color: var(--text);
+    }
+
+    textarea {
+      resize: vertical;
+      min-height: 60px;
+    }
+
+    input:focus,
+    select:focus,
+    textarea:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 1px rgba(37, 99, 235, 0.12);
+    }
+
+    .btn-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 8px;
+    }
+
+    button {
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      padding: 8px 12px;
+      font-size: 13px;
+      cursor: pointer;
+      background: #ffffff;
+      color: var(--text);
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    button.primary {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: white;
+      font-weight: 600;
+    }
+
+    button.danger {
+      border-color: rgba(248, 113, 113, 0.7);
+      color: var(--danger);
+      background: #fef2f2;
+    }
+
+    button:disabled {
+      opacity: 0.5;
+      cursor: default;
+    }
+
+    .gantt-toolbar {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+
+    .segmented {
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      padding: 2px;
+      display: inline-flex;
+      background: #f9fafb;
+      gap: 2px;
+    }
+
+    .segmented button {
+      border-radius: 999px;
+      border: none;
+      background: transparent;
+      padding: 6px 10px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .segmented button.active {
+      background: #ffffff;
+      color: var(--accent);
+      font-weight: 600;
+      box-shadow: 0 0 0 1px rgba(37, 99, 235, 0.18);
+    }
+
+    #gantt-wrapper {
+      height: 70vh;
+      min-height: 420px;
+      overflow: auto;
+      border-top: 1px solid var(--border);
+    }
+
+    #gantt {
+      min-width: 640px;
+    }
+
+    .legend {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 11px;
+      color: var(--muted);
+      margin-left: auto;
+      flex-wrap: wrap;
+    }
+
+    .legend span {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .legend-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 999px;
+      background: #60a5fa;
+    }
+
+    .legend-dot.done {
+      background: #22c55e;
+    }
+
+    .chart-footer {
+      padding: 8px 14px;
+      border-top: 1px solid var(--border);
+      font-size: 11px;
+      color: var(--muted);
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: center;
+    }
+
+    .details-container {
+      font-family: system-ui, -apple-system, Segoe UI, sans-serif;
+      font-size: 12px;
+      padding: 6px 8px 8px;
+      max-width: 260px;
+    }
+
+    .details-container h5 {
+      margin: 0 0 4px;
+      font-size: 13px;
+    }
+
+    .details-container .meta {
+      font-size: 11px;
+      color: var(--muted);
+      margin-bottom: 4px;
+    }
+
+    .details-container dl {
+      margin: 0;
+    }
+
+    .details-container dt {
+      font-weight: 600;
+      display: inline;
+    }
+
+    .details-container dd {
+      display: inline;
+      margin: 0 0 4px;
+    }
+
+    .details-container dd::after {
+      content: "";
+      display: block;
+    }
+
+    @media (max-width: 900px) {
+      .layout {
+        grid-template-columns: minmax(0, 1fr);
+      }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Project Gantt Tracker</h1>
+    <span>Uses /api/tasks to read and write projectTasks.json</span>
+  </header>
+
+  <main class="layout">
+    <!-- Task editor -->
+    <section class="card">
+      <div class="card-header">
+        <h2>Task editor</h2>
+        <span class="small">Changes are saved to projectTasks.json via the API</span>
+      </div>
+      <div class="card-body">
+        <form id="taskForm">
+          <div class="field-row">
+            <div class="field">
+              <label for="taskId">Task ID</label>
+              <input id="taskId" type="text" placeholder="T101" required />
+            </div>
+            <div class="field">
+              <label for="taskFlow">Task flow</label>
+              <input id="taskFlow" type="text" placeholder="Design, Backend, QA" />
+            </div>
+          </div>
+
+          <div class="field-row">
+            <div class="field">
+              <label for="taskName">Task name</label>
+              <input id="taskName" type="text" placeholder="Kickoff" required />
+            </div>
+            <div class="field">
+              <label for="taskProgress">Progress %</label>
+              <input id="taskProgress" type="number" min="0" max="100" value="0" />
+            </div>
+          </div>
+
+          <div class="field">
+            <label for="taskDesc">Description</label>
+            <textarea id="taskDesc" placeholder="Short description of the task"></textarea>
+          </div>
+
+          <div class="field-row">
+            <div class="field">
+              <label for="startDate">Start date</label>
+              <input id="startDate" type="date" />
+            </div>
+            <div class="field">
+              <label for="endDate">Deadline</label>
+              <input id="endDate" type="date" required />
+            </div>
+          </div>
+
+          <hr style="border:none;border-top:1px solid var(--border);margin:10px 0 8px;" />
+
+          <div class="field-row">
+            <div class="field">
+              <label for="critVar">Completion criteria - variable name</label>
+              <input id="critVar" type="text" placeholder="coverage" />
+            </div>
+            <div class="field">
+              <label for="critType">Data type</label>
+              <select id="critType">
+                <option value="">Not set</option>
+                <option value="number">Number</option>
+                <option value="string">String</option>
+                <option value="boolean">Boolean</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="field-row">
+            <div class="field">
+              <label for="critOp">Operator</label>
+              <select id="critOp">
+                <option value="">Not set</option>
+                <option value="&lt;">&lt;</option>
+                <option value="&lt;=">&lt;=</option>
+                <option value=">">&gt;</option>
+                <option value=">=">&gt;=</option>
+                <option value="==">==</option>
+                <option value="!=">!=</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="critValue">Value</label>
+              <input id="critValue" type="text" placeholder="80 or true or Approved" />
+            </div>
+          </div>
+
+          <div class="btn-row">
+            <button type="submit" class="primary">Save task</button>
+            <button type="button" id="clearBtn">Clear form</button>
+            <button type="button" id="deleteBtn" class="danger">Delete task</button>
+          </div>
+
+          <div class="btn-row" style="margin-top:10px;">
+            <button type="button" id="reloadJsonBtn">Reload from server</button>
+            <button type="button" id="exportJsonBtn">Download JSON</button>
+          </div>
+
+          <p class="small" style="margin-top:8px;">
+            API: GET /api/tasks and PUT /api/tasks (full array) read/write projectTasks.json.
+          </p>
+        </form>
+      </div>
+    </section>
+
+    <!-- Gantt chart -->
+    <section class="card">
+      <div class="card-header">
+        <div class="gantt-toolbar">
+          <strong>Timeline</strong>
+          <div class="segmented" id="viewModeSeg">
+            <button data-mode="Day" class="active">Day</button>
+            <button data-mode="Week">Week</button>
+            <button data-mode="Month">Month</button>
+            <button data-mode="Year">Year</button>
+          </div>
+          <button type="button" id="todayBtn">Scroll to today</button>
+
+          <div class="legend">
+            <span><span class="legend-dot"></span> normal</span>
+            <span><span class="legend-dot done"></span> done</span>
+          </div>
+        </div>
+      </div>
+
+      <div id="gantt-wrapper">
+        <div id="gantt"></div>
+      </div>
+
+      <div class="chart-footer">
+        <span class="small">View: <strong id="viewLabel">Day</strong></span>
+        <span class="small">Tip: click a bar to load it into the editor</span>
+      </div>
+    </section>
+  </main>
+
+  <!-- Frappe Gantt CDN JS -->
+  <script src="https://cdn.jsdelivr.net/npm/frappe-gantt/dist/frappe-gantt.umd.js"></script>
+
+  <script>
+    const $ = sel => document.querySelector(sel);
+    const $$ = sel => Array.from(document.querySelectorAll(sel));
+    const formatDate = d => {
+      if (!d) return "";
+      const dt = d instanceof Date ? d : new Date(d);
+      return dt.toISOString().slice(0, 10);
+    };
+
+    function clone(obj) {
+      return JSON.parse(JSON.stringify(obj));
+    }
+
+    let tasks = [];
+    let gantt = null;
+    let currentViewMode = "Day";
+
+    function normalizeTask(raw) {
+      const safe = raw || {};
+      const crit = safe.criteria || {};
+      return {
+        id: String(safe.id || "").trim(),
+        flow: String(safe.flow || "").trim(),
+        name: String(safe.name || "").trim(),
+        description: String(safe.description || "").trim(),
+        start: safe.start || safe.end || formatDate(new Date()),
+        end: safe.end || safe.start || formatDate(new Date()),
+        progress: Number.isFinite(Number(safe.progress)) ? Number(safe.progress) : 0,
+        criteria: {
+          variable: String(crit.variable || "").trim(),
+          type: crit.type || "",
+          operator: crit.operator || "",
+          value: crit.value != null ? String(crit.value) : ""
+        }
+      };
+    }
+
+    function toFrappeTasks() {
+      return tasks.map(t => ({
+        id: t.id,
+        name: t.name || t.id,
+        start: t.start,
+        end: t.end,
+        progress: t.progress,
+        flow: t.flow,
+        description: t.description,
+        criteria: clone(t.criteria || {})
+      }));
+    }
+
+    async function saveTasksToServer() {
+      try {
+        await fetch("/api/tasks", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(tasks)
+        });
+      } catch (err) {
+        console.error("saveTasksToServer failed", err);
+      }
+    }
+
+    async function loadTasksFromServer() {
+      try {
+        const res = await fetch("/api/tasks");
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        const json = await res.json();
+        if (Array.isArray(json)) {
+          tasks = json.map(normalizeTask);
+        } else {
+          console.warn("API returned non-array, ignoring");
+        }
+      } catch (err) {
+        console.error("loadTasksFromServer failed", err);
+        // fallback demo
+        if (!tasks.length) {
+          const today = new Date();
+          tasks = [
+            normalizeTask({
+              id: "T101",
+              flow: "Kickoff",
+              name: "Project kickoff",
+              description: "Initial planning and stakeholder sync",
+              start: formatDate(today),
+              end: formatDate(new Date(today.getTime() + 4 * 86400000)),
+              progress: 40
+            })
+          ];
+        }
+      }
+    }
+
+    function renderGantt() {
+      const frappeTasks = toFrappeTasks();
+
+      const options = {
+        view_mode: currentViewMode,
+        date_format: "YYYY-MM-DD",
+        on_click: task => {
+          loadTaskIntoForm(task.id);
+        },
+        on_date_change: (task, start, end) => {
+          const t = tasks.find(x => x.id === task.id);
+          if (t) {
+            t.start = formatDate(start);
+            t.end = formatDate(end);
+            saveTasksToServer();
+          }
+        },
+        on_progress_change: (task, progress) => {
+          const t = tasks.find(x => x.id === task.id);
+          if (t) {
+            t.progress = progress;
+            saveTasksToServer();
+          }
+        },
+        on_view_change: mode => {
+          currentViewMode = typeof mode === "string" ? mode : mode.name || mode;
+          updateViewLabel();
+          highlightViewButtons();
+        },
+        custom_popup_html: task => {
+          const deadline = task.end || (task._end && formatDate(task._end)) || "";
+          const flow = task.flow || "";
+          const desc = task.description || "";
+          const crit = task.criteria || {};
+          const parts = [];
+
+          if (crit.variable || crit.operator || crit.value) {
+            parts.push(
+              `<dt>Completion criteria</dt><dd>${crit.variable || ""} ${
+                crit.operator || ""
+              } <code>${crit.value || ""}</code> [${crit.type || "any"}]</dd>`
+            );
+          }
+
+          return `
+            <div class="details-container">
+              <h5>${task.name}</h5>
+              <div class="meta">
+                ID: ${task.id}${flow ? " • Flow: " + flow.replace(/</g, "&lt;") : ""}
+              </div>
+              <dl>
+                <dt>Deadline</dt><dd>${deadline}</dd>
+                <dt>Progress</dt><dd>${task.progress || 0}%</dd>
+                <dt>Description</dt><dd>${desc
+                  .replace(/</g, "&lt;")
+                  .replace(/\n/g, "<br>")}</dd>
+                ${parts.join("")}
+              </dl>
+            </div>
+          `;
+        }
+      };
+
+      const container = document.querySelector("#gantt");
+      container.innerHTML = "";
+      gantt = new Gantt("#gantt", frappeTasks, options);
+
+      updateViewLabel();
+      highlightViewButtons();
+    }
+
+    function updateViewLabel() {
+      const label = document.querySelector("#viewLabel");
+      if (label) label.textContent = currentViewMode;
+    }
+
+    function highlightViewButtons() {
+      $$("#viewModeSeg button").forEach(btn => {
+        btn.classList.toggle("active", btn.dataset.mode === currentViewMode);
+      });
+    }
+
+    function scrollToToday() {
+      if (!gantt) return;
+      try {
+        if (typeof gantt.scroll_to_date === "function") {
+          gantt.scroll_to_date(new Date());
+        } else if (typeof gantt.scroll_current === "function") {
+          gantt.scroll_current();
+        }
+      } catch (e) {
+        console.warn("scrollToToday failed or unsupported", e);
+      }
+    }
+
+    function loadTaskIntoForm(taskId) {
+      const t = tasks.find(x => x.id === taskId);
+      if (!t) return;
+
+      $("#taskId").value = t.id;
+      $("#taskFlow").value = t.flow || "";
+      $("#taskName").value = t.name || "";
+      $("#taskDesc").value = t.description || "";
+      $("#startDate").value = t.start || "";
+      $("#endDate").value = t.end || "";
+      $("#taskProgress").value = t.progress != null ? t.progress : 0;
+
+      const crit = t.criteria || {};
+      $("#critVar").value = crit.variable || "";
+      $("#critType").value = crit.type || "";
+      $("#critOp").value = crit.operator || "";
+      $("#critValue").value = crit.value || "";
+    }
+
+    function clearForm() {
+      const form = $("#taskForm");
+      if (form) form.reset();
+      $("#taskProgress").value = 0;
+    }
+
+    function gatherTaskFromForm() {
+      const id = $("#taskId").value.trim();
+      const flow = $("#taskFlow").value.trim();
+      const name = $("#taskName").value.trim();
+      const desc = $("#taskDesc").value.trim();
+      const startRaw = $("#startDate").value;
+      const endRaw = $("#endDate").value;
+      const progressRaw = $("#taskProgress").value;
+
+      if (!id) throw new Error("Task ID is required");
+      if (!name) throw new Error("Task name is required");
+      if (!endRaw) throw new Error("Deadline is required");
+
+      const start = startRaw || endRaw;
+      if (new Date(start) > new Date(endRaw)) {
+        throw new Error("Start date must be before or equal to deadline");
+      }
+
+      const progress = Math.max(0, Math.min(100, Number(progressRaw || 0)));
+
+      const criteria = {
+        variable: $("#critVar").value.trim(),
+        type: $("#critType").value,
+        operator: $("#critOp").value,
+        value: $("#critValue").value.trim()
+      };
+
+      return normalizeTask({
+        id,
+        flow,
+        name,
+        description: desc,
+        start,
+        end: endRaw,
+        progress,
+        criteria
+      });
+    }
+
+    function upsertTask(newTask) {
+      const idx = tasks.findIndex(t => t.id === newTask.id);
+      if (idx >= 0) tasks[idx] = newTask;
+      else tasks.push(newTask);
+      saveTasksToServer();
+      renderGantt();
+    }
+
+    function deleteTaskById(id) {
+      const idx = tasks.findIndex(t => t.id === id);
+      if (idx < 0) return;
+      tasks.splice(idx, 1);
+      saveTasksToServer();
+      renderGantt();
+    }
+
+    function exportJson() {
+      const data = JSON.stringify(tasks, null, 2);
+      const blob = new Blob([data], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "projectTasks.json";
+      a.click();
+      URL.revokeObjectURL(url);
+    }
+
+    // Event wiring
+    const formEl = $("#taskForm");
+    if (formEl) {
+      formEl.addEventListener("submit", evt => {
+        evt.preventDefault();
+        try {
+          const t = gatherTaskFromForm();
+          const existing = tasks.find(x => x.id === t.id);
+          if (existing && !confirm("Task ID exists. Update it?")) return;
+          upsertTask(t);
+          clearForm();
+        } catch (err) {
+          alert(err.message || String(err));
+        }
+      });
+    }
+
+    const clearBtn = $("#clearBtn");
+    if (clearBtn) clearBtn.addEventListener("click", clearForm);
+
+    const deleteBtn = $("#deleteBtn");
+    if (deleteBtn) {
+      deleteBtn.addEventListener("click", () => {
+        const id = $("#taskId").value.trim();
+        if (!id) {
+          alert("Enter Task ID to delete");
+          return;
+        }
+        if (!confirm(`Delete task ${id}?`)) return;
+        deleteTaskById(id);
+        clearForm();
+      });
+    }
+
+    const exportBtn = $("#exportJsonBtn");
+    if (exportBtn) exportBtn.addEventListener("click", exportJson);
+
+    const reloadBtn = $("#reloadJsonBtn");
+    if (reloadBtn) {
+      reloadBtn.addEventListener("click", async () => {
+        await loadTasksFromServer();
+        renderGantt();
+      });
+    }
+
+    const todayBtn = $("#todayBtn");
+    if (todayBtn) todayBtn.addEventListener("click", scrollToToday);
+
+    const viewSeg = $("#viewModeSeg");
+    if (viewSeg) {
+      viewSeg.addEventListener("click", evt => {
+        const btn = evt.target.closest("button");
+        if (!btn) return;
+        const mode = btn.dataset.mode;
+        currentViewMode = mode;
+        if (gantt && typeof gantt.change_view_mode === "function") {
+          gantt.change_view_mode(mode);
+        }
+        highlightViewButtons();
+        updateViewLabel();
+      });
+    }
+
+    // bootstrap
+    (async function init() {
+      await loadTasksFromServer();
+      renderGantt();
+    })();
+  </script>
+</body>
+</html>
