@@ -358,11 +358,11 @@
 
           <div class="field-row">
             <div class="field">
-              <label for="critVar">Completion criteria - variable name</label>
+              <label for="critVar">Task criteria name</label>
               <input id="critVar" type="text" placeholder="coverage" />
             </div>
             <div class="field">
-              <label for="critType">Data type</label>
+              <label for="critType">Task criteria datatype</label>
               <select id="critType">
                 <option value="">Not set</option>
                 <option value="number">Number</option>
@@ -403,7 +403,7 @@
           </div>
 
           <p class="small" style="margin-top:8px;">
-            API: GET /api/tasks and PUT /api/tasks (full array) read/write projectTasks.json.
+            API: GET /api/tasks and PUT /api/tasks (full array) read and write projectTasks.json.
           </p>
         </form>
       </div>
@@ -463,6 +463,15 @@
     function normalizeTask(raw) {
       const safe = raw || {};
       const crit = safe.criteria || {};
+
+      // Support both old and new key names
+      const taskCriteriaName = String(
+        crit.taskCriteriaName != null ? crit.taskCriteriaName : crit.variable || ""
+      ).trim();
+
+      const taskCriteriaDatatype =
+        crit.taskCriteriaDatatype != null ? crit.taskCriteriaDatatype : crit.type || "";
+
       return {
         id: String(safe.id || "").trim(),
         flow: String(safe.flow || "").trim(),
@@ -472,8 +481,8 @@
         end: safe.end || safe.start || formatDate(new Date()),
         progress: Number.isFinite(Number(safe.progress)) ? Number(safe.progress) : 0,
         criteria: {
-          variable: String(crit.variable || "").trim(),
-          type: crit.type || "",
+          taskCriteriaName,
+          taskCriteriaDatatype,
           operator: crit.operator || "",
           value: crit.value != null ? String(crit.value) : ""
         }
@@ -571,11 +580,14 @@
           const crit = task.criteria || {};
           const parts = [];
 
-          if (crit.variable || crit.operator || crit.value) {
+          const name = crit.taskCriteriaName || crit.variable || "";
+          const datatype = crit.taskCriteriaDatatype || crit.type || "any";
+          const operator = crit.operator || "";
+          const value = crit.value || "";
+
+          if (name || operator || value) {
             parts.push(
-              `<dt>Completion criteria</dt><dd>${crit.variable || ""} ${
-                crit.operator || ""
-              } <code>${crit.value || ""}</code> [${crit.type || "any"}]</dd>`
+              `<dt>Completion criteria</dt><dd>${name} ${operator} <code>${value}</code> [${datatype}]</dd>`
             );
           }
 
@@ -643,8 +655,8 @@
       $("#taskProgress").value = t.progress != null ? t.progress : 0;
 
       const crit = t.criteria || {};
-      $("#critVar").value = crit.variable || "";
-      $("#critType").value = crit.type || "";
+      $("#critVar").value = crit.taskCriteriaName || crit.variable || "";
+      $("#critType").value = crit.taskCriteriaDatatype || crit.type || "";
       $("#critOp").value = crit.operator || "";
       $("#critValue").value = crit.value || "";
     }
@@ -676,8 +688,8 @@
       const progress = Math.max(0, Math.min(100, Number(progressRaw || 0)));
 
       const criteria = {
-        variable: $("#critVar").value.trim(),
-        type: $("#critType").value,
+        taskCriteriaName: $("#critVar").value.trim(),
+        taskCriteriaDatatype: $("#critType").value,
         operator: $("#critOp").value,
         value: $("#critValue").value.trim()
       };
