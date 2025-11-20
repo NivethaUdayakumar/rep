@@ -1,0 +1,49 @@
+function renderGantt() {
+  const frappeTasks = toFrappeTasks();
+
+  const options = {
+    view_mode: currentViewMode,
+    date_format: "YYYY-MM-DD",
+    // you can keep these, but they won't fire anymore once drag is blocked
+    on_click: task => {
+      loadTaskIntoForm(task.id);
+    },
+    on_date_change: (task, start, end) => {},
+    on_progress_change: (task, progress) => {},
+    on_view_change: mode => {
+      currentViewMode = typeof mode === "string" ? mode : mode.name || mode;
+      updateViewLabel();
+      highlightViewButtons();
+    },
+    custom_popup_html: task => { /* your popup code */ }
+  };
+
+  const container = document.querySelector("#gantt");
+  container.innerHTML = "";
+  gantt = new Gantt("#gantt", frappeTasks, options);
+
+  // key line: disable drag / resize
+  disableGanttDrag();
+}
+
+function disableGanttDrag() {
+  const wrapper = document.querySelector("#gantt-wrapper");
+  if (!wrapper) return;
+
+  // Capture phase so we run BEFORE Frappe's own handlers
+  ["mousedown", "touchstart"].forEach(evName => {
+    wrapper.addEventListener(
+      evName,
+      e => {
+        const barWrapper = e.target.closest(".bar-wrapper");
+        if (!barWrapper) return;
+
+        // kill drag / resize
+        e.stopImmediatePropagation();
+        e.stopPropagation();
+        // do NOT preventDefault, so the browser can still generate a click
+      },
+      true // capture
+    );
+  });
+}
