@@ -1,231 +1,284 @@
 import os
-import json
 import time
-from pathlib import Path
+import json
+from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
-
 import pandas as pd
 
-CSV_PATH = "records.csv"
-STATE_JSON_PATH = "rerun_state.json"
+CSV_PATH = "monitor.csv"
+STATE_PATH = "monitor_state.json"
+POLL_SECONDS = 5
 
-# -----------------------------
-# Helpers for state and CSV
-# -----------------------------
 
-def load_state(path: str) -> dict:
+# ----------------- Time helpers ----------------- #
+
+def ts_now_str():
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def to_unix(ts_str):
+    return time.mktime(datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S").timetuple())
+
+
+def file_time_str(epoch):
+    return datetime.fromtimestamp(epoch).strftime("%Y-%m-%d %H:%M:%S")
+
+
+# ----------------- Domain functions (replace where needed) ----------------- #
+
+def get_monitor_files():
+    """Return list of files to monitor."""
+    import glob
+    return glob.glob("*.log")   # example
+
+
+def db_exists(file_path):
+    """Return True if DB entry exists for this file."""
+    # Replace with real DB lookup
+    return True
+
+
+def get_data_record(file_path):
+    """
+    Fast data collection from filesystem.
+
+    created / modified are stored as '%Y-%m-%d %H:%M:%S' strings.
+    """
+    st = os.stat(file_path)
+    return {
+        "file": file_path,
+        "created": file_time_str(st.st_ctime),
+        "modified": file_time_str(st.st_mtime),
+        "size": st.st_size,
+        "user": st.st_uid
+    }
+
+
+def data_extraction(file_path):
+    """
+    Very slow extraction work.
+
+    Runs in background threads (non blocking for the monitor loop).
+    """
+    # Replace with your real extraction logic
+    time.sleep(10)
+
+
+# ----------------- State + CSV helpers ----------------- #
+
+def load_state():
+    """Load per file state from JSON so monitor can resume across runs."""
     try:
-        with open(path, "r") as f:
+        with open(STATE_PATH, "r") as f:
             return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
+    except Exception:
         return {}
 
 
-def save_state(state: dict, path: str) -> None:
-    tmp = path + ".tmp"
+def save_state(state):
+    """Save state as pretty printed JSON."""
+    tmp = STATE_PATH + ".tmp"
     with open(tmp, "w") as f:
         json.dump(state, f, indent=2)
-    os.replace(tmp, path)
+    os.replace(tmp, STATE_PATH)
 
 
-def write_df_sorted(df: pd.DataFrame, csv_path: str) -> None:
+def write_sorted_csv(df):
+    """Write CSV sorted by file and modified (both strings)."""
     if df.empty:
         return
-
-    # df has index = file path. For CSV we want file as a column.
-    out = df.reset_index().rename(columns={"index": "file"})
-
-    # Sort ascending by modified time then file
-    out = out.sort_values(["mtime_now", "file"], ascending=[True, True])
-
-    tmp = csv_path + ".tmp"
-    out.to_csv(tmp, index=False)
-    os.replace(tmp, csv_path)
+    tmp = CSV_PATH + ".tmp"
+    df.sort_values(["file", "modified"], ascending=[True, True]).to_csv(tmp, index=False)
+    os.replace(tmp, CSV_PATH)
 
 
-# -----------------------------
-# Your domain-specific functions
-# -----------------------------
+# ----------------- Status + rerun logic ----------------- #
 
-def collect_fast(file_path: str) -> dict:
-    """Fast data collection, runs on every loop for every file."""
-    return {
-        "size_now": os.path.getsize(file_path),
-        "mtime_now": os.path.getmtime(file_path),
-    }
-
-
-def extract_slow(file_path: str) -> dict:
-    """Slow data extraction. This runs in background threads."""
-    # TODO: replace with your real slow extraction
-    time.sleep(3)  # simulate slow work
-    return {
-        "extract_metric": 42,        # example extracted field
-        "raw_result": "ok",          # example internal result
-    }
-
-
-def get_status(extract_result: dict) -> str:
-    """Compute final status based on extraction result."""
-    # TODO: replace with your real status logic
-    raw = extract_result.get("raw_result", "ok")
-    if raw == "ok":
-        return "complete"
-    return "failed"
-
-
-def get_file_list() -> list[str]:
-    """Return the list of files to monitor."""
-    # TODO: adjust this to your real source of files
-    return [str(p) for p in Path(".").glob("*.log")]  # example
-
-
-# -----------------------------
-# Continuous monitor
-# -----------------------------
-
-def monitor_forever(poll_interval: float = 2.0, max_workers: int = 4):
+def get_status_and_update_info(file_path, rec, info, now_unix, is_extracting):
     """
-    Continuous monitor loop:
-    - fast collection every cycle for all files
-    - slow extraction only for new/changed files
-    - non-blocking: monitor does not wait for extraction
-    - CSV and JSON updated when anything changes
+    Compute status and update state info (including rerun).
+
+    States:
+      - 'await extraction'
+      - 'file running'
+      - 'extracting'
+      - 'file failed'
+      - 'complete'
     """
 
-    # State per file persisted across runs
-    # { file: { last_status, last_extracted_mtime, rerun_count, ... } }
-    state = load_state(STATE_JSON_PATH)
+    modified_unix = to_unix(rec["modified"])
+    size = rec["size"]
 
-    # DataFrame with index = file path
-    # Columns: status, rerun_count, mtime_now, size_now, extract_metric, ...
-    df = pd.DataFrame(
-        columns=["status", "rerun_count", "mtime_now", "size_now", "extract_metric"]
-    )
-    df.index.name = "file"
+    last_seen_mtime = info.get("last_seen_mtime")             # unix
+    last_seen_size = info.get("last_seen_size")
+    last_change_time = info.get("last_change_time")           # unix
+    last_extracted_mtime = info.get("last_extracted_mtime")   # unix or None
+    last_status = info.get("last_status")
+    rerun = info.get("rerun", 0)
 
-    # Track ongoing extractions: future -> file_path
-    future_to_file = {}
+    # Track last time file changed (mtime or size)
+    if last_seen_mtime is None or modified_unix != last_seen_mtime or size != last_seen_size:
+        last_change_time = now_unix
 
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        try:
-            while True:
-                dirty_csv = False       # did anything change in df that requires a CSV write
-                dirty_state = False     # did state JSON change
+    exists = db_exists(file_path)
 
-                files = get_file_list()
+    if is_extracting:
+        status = "extracting"
+    else:
+        if exists:
+            never_extracted = last_extracted_mtime is None
+            changed_after_extract = last_extracted_mtime is not None and modified_unix > last_extracted_mtime
 
-                # First pass: fast data collection for all files
-                for file_path in files:
-                    file_path = str(file_path)
-                    fast = collect_fast(file_path)
-                    mtime_now = fast["mtime_now"]
-                    size_now = fast["size_now"]
+            if never_extracted:
+                # first ever extraction, rerun stays at 0
+                status = "await extraction"
+            elif changed_after_extract:
+                # file was extracted before and is now modified
+                # increment rerun only when we are moving from complete to a new extraction
+                if last_status == "complete":
+                    rerun += 1
+                status = "await extraction"
+            else:
+                # already extracted and up to date
+                status = "complete"
+        else:
+            # DB does not exist yet, file might be running or stalled
+            age = now_unix - (last_change_time if last_change_time is not None else now_unix)
+            if age <= 15 * 60:
+                status = "file running"
+            else:
+                status = "file failed"
 
-                    prev = state.get(file_path, {})
-                    prev_status = prev.get("last_status")
-                    last_extracted_mtime = prev.get("last_extracted_mtime", 0.0)
-                    rerun_count = prev.get("rerun_count", 0)
+    # Update info for next iterations
+    info["last_seen_mtime"] = modified_unix
+    info["last_seen_size"] = size
+    info["last_change_time"] = last_change_time
+    info["rerun"] = rerun
 
-                    # Decide if we need to trigger slow extraction
-                    in_progress = any(file_path == f for f in future_to_file.values())
-                    need_extract = False
+    return status, info
 
-                    if not prev:
-                        # New file
-                        need_extract = True
-                    elif mtime_now > last_extracted_mtime:
-                        # File changed since last extraction
-                        need_extract = True
 
-                    status = prev_status or "unknown"
+# ----------------- Main monitor ----------------- #
 
-                    if need_extract and not in_progress:
-                        # If it was previously complete and we re-extract, bump rerun count
-                        if prev_status == "complete":
-                            rerun_count += 1
-                        status = "extracting"
-                        future = pool.submit(extract_slow, file_path)
-                        future_to_file[future] = file_path
-                        dirty_state = True  # rerun_count changed
+def monitor_forever():
+    """
+    Monitor behaviour (continuous loop):
 
-                    # Update DataFrame row
-                    if file_path in df.index:
-                        row = df.loc[file_path]
-                        if (
-                            row["mtime_now"] != mtime_now
-                            or row["size_now"] != size_now
-                            or row["status"] != status
-                            or row["rerun_count"] != rerun_count
-                        ):
-                            dirty_csv = True
-                        df.loc[file_path, "mtime_now"] = mtime_now
-                        df.loc[file_path, "size_now"] = size_now
-                        df.loc[file_path, "status"] = status
-                        df.loc[file_path, "rerun_count"] = rerun_count
-                    else:
-                        df.loc[file_path] = {
-                            "status": status,
-                            "rerun_count": rerun_count,
-                            "mtime_now": mtime_now,
-                            "size_now": size_now,
-                            "extract_metric": prev.get("extract_metric"),
-                        }
-                        dirty_csv = True
+    - For each iteration:
+      1) get_monitor_files()
+      2) For each file:
+         - call get_data_record()  [fast data collection]
+         - compute status using get_status_and_update_info()
+         - if status == 'await extraction', start data_extraction() non blocking
+         - update record in DataFrame (including rerun)
+      3) Handle finished extractions:
+         - set status to 'complete' or 'file failed'
+         - set last_extracted_mtime when complete
+      4) Write CSV once, sorted by file + modified, if anything changed
+      5) Save state JSON (pretty printed)
+    """
 
-                # Second pass: check which slow extractions have finished (non-blocking)
-                finished_futures = [
-                    fut for fut in list(future_to_file.keys()) if fut.done()
-                ]
+    state = load_state()         # file -> dict with last_seen_mtime, rerun, etc.
+    df = pd.DataFrame()          # current snapshot of records
+    future_to_file = {}          # background extractions: future -> file
 
-                for fut in finished_futures:
-                    file_path = future_to_file.pop(fut)
-                    try:
-                        extract_result = fut.result()
-                        # Update extraction-related fields in df
-                        for k, v in extract_result.items():
-                            if k not in df.columns:
-                                df[k] = None
-                            df.loc[file_path, k] = v
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        while True:
+            now_unix = time.time()
+            files = get_monitor_files()
+            new_files = 0
+            dirty_csv = False
 
-                        final_status = get_status(extract_result)
-                        df.loc[file_path, "status"] = final_status
-                    except Exception as e:
-                        final_status = f"error: {e}"
-                        df.loc[file_path, "status"] = final_status
+            # -------- pass 1: fast data collection across all files -------- #
+            for file_path in files:
+                rec = get_data_record(file_path)
+                file_key = rec["file"]
 
-                    # Update state for this file
-                    mtime_now = float(df.loc[file_path, "mtime_now"])
-                    rerun_count = int(df.loc[file_path, "rerun_count"])
-                    extract_metric = df.loc[file_path, "extract_metric"]
+                info = state.get(file_key, {})
+                if file_key not in state:
+                    new_files += 1
 
-                    state[file_path] = {
-                        "last_status": final_status,
-                        "last_extracted_mtime": mtime_now,
-                        "rerun_count": rerun_count,
-                        "extract_metric": extract_metric,
-                    }
+                is_extracting = any(
+                    f == file_key and not fut.done()
+                    for fut, f in future_to_file.items()
+                )
 
-                    dirty_state = True
+                prev_status = info.get("last_status")
+                prev_mtime = info.get("last_seen_mtime")
+                prev_rerun = info.get("rerun", 0)
+
+                # compute status and possibly update rerun in info
+                status, info = get_status_and_update_info(file_key, rec, info, now_unix, is_extracting)
+
+                # start extraction for await extraction
+                if status == "await extraction" and not is_extracting:
+                    fut = pool.submit(data_extraction, file_key)
+                    future_to_file[fut] = file_key
+                    status = "extracting"  # reflect that job has started
+
+                info["last_status"] = status
+                state[file_key] = info
+
+                rerun = info.get("rerun", 0)
+                rec["status"] = status
+                rec["rerun"] = rerun
+
+                # detect if this row changed enough to require CSV rewrite
+                new_file = prev_mtime is None
+                modified_changed = prev_mtime is not None and to_unix(rec["modified"]) != prev_mtime
+                status_changed = prev_status != status
+                rerun_changed = rerun != prev_rerun
+
+                if new_file or modified_changed or status_changed or rerun_changed:
                     dirty_csv = True
 
-                    print(
-                        f"[extract-done] {file_path} "
-                        f"status={final_status} rerun_count={rerun_count}"
-                    )
+                # upsert record into df
+                if df.empty:
+                    df = pd.DataFrame([rec])
+                else:
+                    mask = df["file"] == file_key
+                    if mask.any():
+                        for k, v in rec.items():
+                            df.loc[mask, k] = v
+                    else:
+                        df = pd.concat([df, pd.DataFrame([rec])], ignore_index=True)
 
-                # Persist changes if any
-                if dirty_csv:
-                    write_df_sorted(df, CSV_PATH)
+            # -------- pass 2: handle finished extractions (non blocking) -------- #
+            finished = [fut for fut in list(future_to_file.keys()) if fut.done()]
+            for fut in finished:
+                file_key = future_to_file.pop(fut)
+                info = state.get(file_key, {})
+                try:
+                    fut.result()
+                    info["last_status"] = "complete"
+                    info["last_extracted_mtime"] = info.get("last_seen_mtime")
+                    new_status = "complete"
+                except Exception:
+                    info["last_status"] = "file failed"
+                    new_status = "file failed"
 
-                if dirty_state:
-                    save_state(state, STATE_JSON_PATH)
+                state[file_key] = info
 
-                time.sleep(poll_interval)
+                if not df.empty:
+                    mask = df["file"] == file_key
+                    if mask.any():
+                        df.loc[mask, "status"] = new_status
+                        dirty_csv = True
 
-        except KeyboardInterrupt:
-            print("Stopping monitor...")
+            # -------- write CSV once per loop, sorted -------- #
+            if dirty_csv and not df.empty:
+                write_sorted_csv(df)
+
+            # -------- stats + persist state -------- #
+            print(
+                f"monitored={len(files)} "
+                f"new_files={new_files} "
+                f"extractions_running={len(future_to_file)}"
+            )
+
+            save_state(state)
+            time.sleep(POLL_SECONDS)
 
 
 if __name__ == "__main__":
-    monitor_forever(poll_interval=2.0, max_workers=4)
+    monitor_forever()
