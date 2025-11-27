@@ -1,0 +1,27 @@
+//state json 
+{
+  "/logs/job1.log": {
+    "last_seen_mtime": 1732700000.0,
+    "last_seen_size": 102400,
+    "last_change_time": 1732700005.0,
+    "last_extracted_mtime": 1732700000.0,
+    "last_status": "complete",
+    "rerun": 0
+  },
+  "/logs/job2.log": {
+    "last_seen_mtime": 1732703600.0,
+    "last_seen_size": 204800,
+    "last_change_time": 1732703600.0,
+    "last_extracted_mtime": 1732700000.0,
+    "last_status": "await extraction",
+    "rerun": 1
+  }
+}
+
+//monitor csv 
+file,created,modified,size,user,status,rerun
+/logs/job1.log,2025-01-27 22:12:01,2025-01-27 22:12:01,102400,1001,complete,0
+/logs/job2.log,2025-01-27 22:20:45,2025-01-27 22:35:10,204800,1001,extracting,1
+/logs/job3.log,2025-01-27 22:40:03,2025-01-27 22:40:03,51200,1001,file running,0
+/logs/job4.log,2025-01-27 21:55:30,2025-01-27 21:59:10,4096,1001,file failed,0
+/logs/job5.log,2025-01-27 22:41:00,2025-01-27 22:41:00,16384,1001,await extraction,0
