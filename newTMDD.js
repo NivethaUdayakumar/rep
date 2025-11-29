@@ -86,9 +86,12 @@ export class MultiDrilldown {
 
     this._enableRightClickCopy(this.name);
 
+    // keep original records for custom filtering
+    grid._mdAllRecords = (grid.records || []).slice();
+
     // apply datatype config on main grid
     this._applyColumnTypes(grid, null);
-    // enable multi search handling
+    // enable multi search handling + custom filtering + column highlight
     this._enableMultiSearch(grid);
 
     if (Number.isInteger(this.promoteIdx) &&
@@ -551,9 +554,12 @@ export class MultiDrilldown {
       const dd = w2ui[gname];
       this._ensureToolbar(dd);
 
+      // snapshot original records for this drilldown grid
+      dd._mdAllRecords = (dd.records || []).slice();
+
       // apply datatype config for this drilldown step
       this._applyColumnTypes(dd, step);
-      // enable multi search handling
+      // enable multi search handling + custom filtering + column highlight
       this._enableMultiSearch(dd);
 
       const presets = this._searchPresetsFor(state);
@@ -667,7 +673,7 @@ export class MultiDrilldown {
     for (const partRaw of s.split(',')) {
       const part = partRaw.trim();
       if (!part) continue;
-      const m = part.match(/^(\d+)\s*-\s*(\d+)$/);
+      const m = part.match(/^(\d+)\s*\-\s*(\d+)$/);
       if (m) {
         const a = Number(m[1]), b = Number(m[2]);
         const lo = Math.min(a, b), hi = Math.max(a, b);
@@ -965,7 +971,7 @@ export class MultiDrilldown {
     }, 900);
   }
 
-  /* ======================= Datatype config + multi search ======================= */
+  /* ======================= Datatype config + multi search + custom filter ======================= */
 
   // step null = main grid, step 0+ = drilldown steps
   _applyColumnTypes(grid, step) {
@@ -1002,6 +1008,9 @@ export class MultiDrilldown {
 
       col.searchable = true;
 
+      // store custom type hint on column for later matching
+      col._mdSearchType = w2type;
+
       let s = grid.searches.find(x => x.field === field);
       const caption = col.text || col.caption || field;
       if (!s) {
@@ -1014,7 +1023,6 @@ export class MultiDrilldown {
 
       // operators per type
       if (w2type === 'float' || w2type === 'int') {
-        // numeric
         s.operators = [
           'is',          // ==
           'between',     // range
@@ -1026,20 +1034,16 @@ export class MultiDrilldown {
           'not null'
         ];
       } else if (w2type === 'text') {
-        // plain text (if you ever use it)
         s.operators = [
           'contains',
           'not contains'
         ];
       } else if (w2type === 'date' || w2type === 'datetime') {
-        // date
         s.operators = [
           'is',
           'between'
         ];
       } else if (w2type === 'enum') {
-        // enum for string multi select dropdown
-        // build unique item list from column values
         const set = new Set();
         for (const r of recs) {
           const v = r[field];
@@ -1072,9 +1076,7 @@ export class MultiDrilldown {
     return null;
   }
 
-  // Multi search handler
-  // For string (enum) we rely on w2ui in / not in using the multi select dropdown
-  // For non string fields we keep the old "a/b/c" helper if you still want it
+  // Multi search handler plus custom filter and COLUMN highlight (purple)
   _enableMultiSearch(grid) {
     if (!grid) return;
     if (grid._mdMultiSearchBound) return;
@@ -1085,16 +1087,16 @@ export class MultiDrilldown {
       const data = Array.isArray(ev.searchData) ? ev.searchData : [];
       const searches = grid.searches || [];
 
+      // Normalize multi value for non enum types ("a/b/c" helper)
       const out = data.map((cond) => {
         const def = searches.find(s => s.field === cond.field);
         const type = def?.type;
 
-        // If this is a string enum search, do not use the "cat/dog" parsing.
+        // For enum (string) and text we do not split on "/"
         if (type === 'enum' || type === 'text') {
           return cond;
         }
 
-        // For other types, keep optional "a/b/c" multi value helper
         if (typeof cond?.value === 'string' && cond.value.includes('/')) {
           const parts = cond.value
             .split('/')
@@ -1109,7 +1111,325 @@ export class MultiDrilldown {
       });
 
       ev.searchData = out;
+
+      // Cancel default w2ui search and run our own type aware filter
+      ev.preventDefault();
+
+      const logic = (ev.searchLogic || ev.logic || (grid.last && grid.last.logic) || 'AND');
+      this._runAdvancedFilter(grid, ev.searchData, logic);
     });
+  }
+
+  // Run custom advanced filter on a grid and color FILTER COLUMNS purple
+  _runAdvancedFilter(grid, searchData, logic) {
+    if (!grid) return;
+
+    if (!grid._mdAllRecords) {
+      grid._mdAllRecords = (grid.records || []).slice();
+    }
+
+    // cache original column styles once
+    if (!grid._mdColBaseStyles) {
+      grid._mdColBaseStyles = (grid.columns || []).map(c => c.style || '');
+    }
+
+    const cols = grid.columns || [];
+
+    const restoreColumnStyles = () => {
+      cols.forEach((c, idx) => {
+        c.style = grid._mdColBaseStyles[idx] || '';
+      });
+    };
+
+    // restore base styles initially
+    restoreColumnStyles();
+
+    const all = grid._mdAllRecords;
+
+    if (!searchData || !searchData.length) {
+      // no filters: restore full set, no purple
+      grid.records = all.slice();
+      grid.total = grid.records.length;
+      grid.refresh();
+      return;
+    }
+
+    const filtered = this._applyAdvancedFilterRecords(
+      all,
+      searchData,
+      cols,
+      grid.searches || [],
+      logic
+    );
+
+    // figure out which fields are being filtered
+    const filteredFields = new Set(
+      searchData
+        .map(c => c && c.field)
+        .filter(Boolean)
+    );
+
+    // apply purple highlight to those columns (header + cells)
+    cols.forEach((c, idx) => {
+      if (filteredFields.has(c.field)) {
+        const base = grid._mdColBaseStyles[idx] || '';
+        const extra = 'background-color:#f3e8ff;color:#2d0a57;';
+        c.style = base ? `${base}; ${extra}` : extra;
+      }
+    });
+
+    grid.records = filtered;
+    grid.total = filtered.length;
+    grid.refresh();
+  }
+
+  _applyAdvancedFilterRecords(records, searchData, columns, searches, logic) {
+    if (!Array.isArray(records) || !records.length) return [];
+
+    const colsByField = {};
+    (columns || []).forEach(c => {
+      if (c.field) colsByField[c.field] = c;
+    });
+
+    const searchTypeByField = {};
+    (searches || []).forEach(s => {
+      if (s.field) searchTypeByField[s.field] = s.type;
+    });
+
+    const useOr = String(logic || 'AND').toUpperCase() === 'OR';
+
+    return records.filter(rec => {
+      let any = false;
+      let all = true;
+
+      for (const cond of searchData) {
+        if (!cond || !cond.field) continue;
+        const field = cond.field;
+        const rawType =
+          searchTypeByField[field] ||
+          colsByField[field]?._mdSearchType ||
+          colsByField[field]?.dataType ||
+          'text';
+
+        const fieldValue = rec[field];
+        const matched = this._matchFieldBySearchType(fieldValue, cond, rawType);
+
+        if (matched) any = true;
+        else all = false;
+
+        if (!useOr && !matched) {
+          return false;
+        }
+      }
+
+      return useOr ? any : all;
+    });
+  }
+
+  _matchFieldBySearchType(fieldValue, cond, typeSpecRaw) {
+    const t = String(typeSpecRaw || '').toLowerCase();
+    const op = cond.operator || 'contains';
+
+    if (t === 'float' || t === 'int' || t === 'number') {
+      return this._matchFloatAdvanced(fieldValue, op, cond.value, cond.value2);
+    }
+
+    if (t === 'date' || t === 'datetime') {
+      return this._matchDateAdvanced(fieldValue, op, cond.value, cond.value2);
+    }
+
+    // default to string/enum
+    return this._matchStringAdvanced(fieldValue, op, cond.value);
+  }
+
+  // Numeric matching for w2ui operators
+  _matchFloatAdvanced(fieldValue, op, value1, value2) {
+    if (op === 'null') {
+      return fieldValue === null || fieldValue === undefined || String(fieldValue).trim() === '';
+    }
+    if (op === 'not null') {
+      return !(fieldValue === null || fieldValue === undefined || String(fieldValue).trim() === '');
+    }
+
+    const num = Number(fieldValue);
+    if (Number.isNaN(num)) return false;
+
+    let v1;
+    let v2;
+
+    if (Array.isArray(value1)) {
+      v1 = Number(value1[0]);
+      v2 = Number(value1[1]);
+    } else {
+      v1 = Number(value1);
+      v2 = value2 !== undefined ? Number(value2) : undefined;
+    }
+
+    if (Number.isNaN(v1)) return false;
+
+    switch (op) {
+      case 'is':
+      case '=':
+      case '==':
+        return num === v1;
+      case 'more':
+      case '>':
+        return num > v1;
+      case 'less':
+      case '<':
+        return num < v1;
+      case 'more equal':
+      case '>=':
+        return num >= v1;
+      case 'less equal':
+      case '<=':
+        return num <= v1;
+      case 'between':
+        if (v2 === undefined || Number.isNaN(v2)) return false;
+        return num >= v1 && num <= v2;
+      case '!=':
+        return num !== v1;
+      default:
+        return num === v1;
+    }
+  }
+
+  // String and enum matching, with in / not in
+  _matchStringAdvanced(fieldValue, op, filterValue) {
+    const safe = (v) => String(v ?? '');
+    const val = safe(fieldValue);
+    const vLower = val.toLowerCase();
+
+    if (op === 'in' || op === 'not in') {
+      let selected = filterValue;
+
+      if (!Array.isArray(selected)) {
+        selected = safe(selected)
+          .split(',')
+          .map(s => s.trim())
+          .filter(Boolean);
+      }
+
+      const hit = selected.some(opt => vLower === safe(opt).toLowerCase());
+      return op === 'in' ? hit : !hit;
+    }
+
+    const fStr = safe(filterValue).toLowerCase();
+
+    switch (op) {
+      case 'contains':
+        return vLower.indexOf(fStr) !== -1;
+      case 'not contains':
+        return vLower.indexOf(fStr) === -1;
+      case 'is':
+      case '=':
+      case '==':
+        return vLower === fStr;
+      case '!=':
+        return vLower !== fStr;
+      default:
+        return vLower.indexOf(fStr) !== -1;
+    }
+  }
+
+  // Date matching for "is" and "between"
+  _matchDateAdvanced(fieldValue, op, v1, v2) {
+    const d = this._parseEuOrIsoDate(fieldValue);
+    if (!d) return false;
+
+    if (op === 'is') {
+      const target = this._parseEuOrIsoDate(
+        Array.isArray(v1) ? v1[0] : v1
+      );
+      if (!target) return false;
+      return this._sameCalendarDate(d, target);
+    }
+
+    if (op === 'between') {
+      let raw1;
+      let raw2;
+
+      if (Array.isArray(v1)) {
+        raw1 = v1[0];
+        raw2 = v1[1];
+      } else {
+        raw1 = v1;
+        raw2 = v2;
+      }
+
+      const start = this._parseEuOrIsoDate(raw1);
+      const end = this._parseEuOrIsoDate(raw2);
+      if (!start || !end) return false;
+
+      start.setHours(0, 0, 0, 0);
+      end.setHours(23, 59, 59, 999);
+
+      return d >= start && d <= end;
+    }
+
+    if (op === 'null') {
+      return !fieldValue;
+    }
+    if (op === 'not null') {
+      return !!fieldValue;
+    }
+
+    const fallback = this._parseEuOrIsoDate(v1);
+    if (!fallback) return false;
+    return this._sameCalendarDate(d, fallback);
+  }
+
+  _parseEuOrIsoDate(value) {
+    if (!value) return null;
+    if (value instanceof Date) {
+      if (Number.isNaN(value.getTime())) return null;
+      return value;
+    }
+
+    const str = String(value).trim();
+    if (!str) return null;
+
+    const parts = str.split(' ');
+    const datePart = parts[0];
+    const timePart = parts[1] || '00:00:00';
+
+    const dPieces = datePart.split(/[\/.\-]/).map(x => Number(x));
+    if (dPieces.length < 3) {
+      const auto = new Date(str);
+      if (Number.isNaN(auto.getTime())) return null;
+      return auto;
+    }
+
+    let y;
+    let m;
+    let d;
+
+    if (dPieces[0] > 1900) {
+      y = dPieces[0];
+      m = dPieces[1];
+      d = dPieces[2];
+    } else {
+      d = dPieces[0];
+      m = dPieces[1];
+      y = dPieces[2];
+    }
+
+    const tPieces = timePart.split(':').map(x => Number(x));
+    const hh = tPieces[0] || 0;
+    const mm = tPieces[1] || 0;
+    const ss = tPieces[2] || 0;
+
+    const dt = new Date(y, m - 1, d, hh, mm, ss);
+    if (Number.isNaN(dt.getTime())) return null;
+    return dt;
+  }
+
+  _sameCalendarDate(d1, d2) {
+    return (
+      d1.getFullYear() === d2.getFullYear() &&
+      d1.getMonth() === d2.getMonth() &&
+      d1.getDate() === d2.getDate()
+    );
   }
 
   /* ======================= Utils ======================= */
@@ -1164,6 +1484,15 @@ export class MultiDrilldown {
       if (String(recs[i].recid) === String(recid)) return i;
     }
     return -1;
+  }
+
+  _resolvePromotePattern(pattern, rec, fields) {
+    if (!pattern) return '';
+    return String(pattern).replace(/\{(\d+)\}/g, (_, idxStr) => {
+      const idx = Number(idxStr);
+      const field = fields[idx];
+      return String(rec[field] ?? '');
+    });
   }
 
   /* ======================= Shell runner ======================= */
