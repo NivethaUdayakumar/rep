@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>w2ui dynamic enum search</title>
+
+    <!-- jQuery -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.7.1/jquery.min.js"></script>
+
+    <!-- w2ui -->
+    <link rel="stylesheet" href="https://rawcdn.githack.com/vitmalina/w2ui/master/dist/w2ui.min.css">
+    <script src="https://rawcdn.githack.com/vitmalina/w2ui/master/dist/w2ui.min.js"></script>
+
+    <style>
+        html, body {
+            height: 100%;
+            margin: 0;
+            font-family: Arial, sans-serif;
+        }
+        #grid {
+            width: 100%;
+            height: 100%;
+        }
+    </style>
+</head>
+<body>
+
+<div id="grid"></div>
+
+<script>
+// ---------- helper: parse "DD/MM/YYYY HH:MM:SS" ----------
+function parseEuDateTime(val) {
+    if (!val) return null;
+
+    if (Object.prototype.toString.call(val) === "[object Date]") {
+        return isNaN(val.getTime()) ? null : val;
+    }
+
+    const str = String(val).trim();
+    if (!str) return null;
+
+    const parts = str.split(" ");
+    const datePart = parts[0];
+    const timePart = parts[1] || "00:00:00";
+
+    const dParts = datePart.split("/");
+    if (dParts.length !== 3) return null;
+
+    const tParts = timePart.split(":");
+    if (tParts.length < 2) return null;
+
+    const dd = parseInt(dParts[0], 10);
+    const mm = parseInt(dParts[1], 10);
+    const yyyy = parseInt(dParts[2], 10);
+
+    const HH = parseInt(tParts[0], 10) || 0;
+    const MM = parseInt(tParts[1], 10) || 0;
+    const SS = parseInt(tParts[2] || "0", 10) || 0;
+
+    if (!yyyy || !mm || !dd) return null;
+
+    return new Date(yyyy, mm - 1, dd, HH, MM, SS);
+}
+
+// ---------- core: our custom evaluator ----------
+function recordMatchesSearch(grid, rec) {
+    const sdata = grid.searchData;
+    if (!sdata || !sdata.length) return true;
+
+    for (const s of sdata) {
+        const field = s.field;
+        const type  = s.type;
+        const op    = s.operator;
+        const raw   = rec[field];
+
+        // FLOAT: <=, >=, <, >, ==
+        if (type === "float") {
+            const recVal = parseFloat(raw);
+            const target = parseFloat(s.value);
+
+            if (Number.isNaN(recVal) || Number.isNaN(target)) return false;
+
+            let ok = true;
+            if (op === "<=") ok = recVal <= target;
+            else if (op === ">=") ok = recVal >= target;
+            else if (op === "<") ok = recVal < target;
+            else if (op === ">") ok = recVal > target;
+            else if (op === "==") ok = recVal === target;
+
+            if (!ok) return false;
+        }
+
+        // STRING via enum UI: "in" / "not in" with multi select chips
+        else if (type === "enum") {
+            const text = String(raw == null ? "" : raw);
+            const selected = Array.isArray(s.value)
+                ? s.value.map(v => v.text ?? v.id ?? String(v))
+                : [];
+
+            const containsAny = selected.some(opt => text.includes(opt));
+
+            let ok = true;
+            if (op === "in") {
+                ok = containsAny;
+            } else if (op === "not in") {
+                ok = !containsAny;
+            }
+
+            if (!ok) return false;
+        }
+
+        // DATETIME: "is" / "between"
+        else if (type === "datetime") {
+            const recDate = parseEuDateTime(raw);
+            if (!recDate) return false;
+
+            if (op === "is") {
+                const target = parseEuDateTime(s.value);
+                if (!target) return false;
+                if (recDate.getTime() !== target.getTime()) return false;
+            } else if (op === "between") {
+                const arr = s.value || [];
+                const v1 = arr[0];
+                const v2 = arr[1];
+                const d1 = parseEuDateTime(v1);
+                const d2 = parseEuDateTime(v2);
+                if (!d1 || !d2) return false;
+
+                const t  = recDate.getTime();
+                const t1 = d1.getTime();
+                const t2 = d2.getTime();
+
+                if (!(t >= t1 && t <= t2)) return false;
+            }
+        }
+    }
+
+    return true;
+}
+
+// ---------- helper: build enum items from unique column values ----------
+function populateEnumFromColumn(grid, fieldName) {
+    const values = new Set();
+
+    grid.records.forEach(rec => {
+        const v = rec[fieldName];
+        if (v != null && v !== "") {
+            values.add(String(v));
+        }
+    });
+
+    const items = Array.from(values)
+        .sort()
+        .map(v => ({ id: v, text: v }));
+
+    const search = grid.getSearch(fieldName);
+    if (search) {
+        search.options = search.options || {};
+        search.options.items = items;
+    }
+}
+
+$(function () {
+    // ---------- grid ----------
+    $("#grid").w2grid({
+        name: "myGrid",
+        show: {
+            toolbar: true,
+            footer: true,
+            toolbarSearch: false,   // we’ll use toolbarSearch go-to-advanced
+            toolbarReload: true,
+            toolbarColumns: true,
+            toolbarInput: false
+        },
+        columns: [
+            { field: "recid",  text: "ID",       size: "60px" },
+            { field: "score",  text: "Score",    size: "100px" },
+            { field: "status", text: "Status",   size: "120px" },
+            { field: "ts",     text: "Timestamp", size: "200px" }
+        ],
+        records: [
+            { recid: 1, score: 10.5, status: "active",   ts: "25/11/2025 13:45:10" },
+            { recid: 2, score:  7.2, status: "selected", ts: "26/11/2025 09:30:05" },
+            { recid: 3, score: 15.0, status: "inactive", ts: "27/11/2025 20:15:00" },
+            { recid: 4, score:  3.8, status: "active",   ts: "27/11/2025 08:00:00" }
+        ],
+        searches: [
+            {
+                field: "score",
+                type: "float",
+                operator: "==",
+                operators: ["<=", ">=", "<", ">", "=="]
+            },
+            {
+                field: "status",
+                type: "enum",             // enum gives the chips UI
+                operator: "in",
+                operators: ["in", "not in"],
+                options: {
+                    items: []             // will be filled dynamically
+                }
+            },
+            {
+                field: "ts",
+                type: "datetime",
+                operator: "is",
+                operators: ["is", "between"]
+            }
+        ],
+        onLoad: function (event) {
+            // if you use .load(url), call populateEnumFromColumn here after data is loaded
+        },
+        onRefresh: function (event) {
+            // nothing special needed; advanced search uses search.options.items
+        }
+    });
+
+    const grid = w2ui.myGrid;
+
+    // build enum items for "status" from unique column values
+    populateEnumFromColumn(grid, "status");
+
+    // keep original localSearch if you ever need it
+    const originalLocalSearch = grid.localSearch.bind(grid);
+
+    // override localSearch to use our evaluator
+    grid.localSearch = function () {
+        if (this.url && !Array.isArray(this.url)) {
+            return originalLocalSearch();
+        }
+
+        const allRecords = this.records;
+        const matchedIds = [];
+
+        for (const rec of allRecords) {
+            if (recordMatchesSearch(this, rec)) {
+                matchedIds.push(rec.recid);
+            }
+        }
+
+        this.total = matchedIds.length;
+        this.last.searchIds = matchedIds;
+        this.buffered = matchedIds.length;
+        this.refresh();
+    };
+});
+</script>
+
+</body>
+</html>
