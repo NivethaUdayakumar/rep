@@ -1,0 +1,90 @@
+//Server.js
+// server.js
+const http   = require('http');
+const fs     = require('fs');
+const path   = require('path');
+const router = require('./Server/router');
+
+// load master config
+const masterConfigPath = path.join(__dirname, 'masterConfig.json');
+if (!fs.existsSync(masterConfigPath)) {
+  console.error('masterConfig.json not found');
+  process.exit(1);
+}
+
+const masterConfig = JSON.parse(fs.readFileSync(masterConfigPath, 'utf8'));
+
+// create one server per project code
+for (const [projectCode, cfg] of Object.entries(masterConfig)) {
+  if (!cfg.port) {
+    console.error(`Project ${projectCode} has no port`);
+    process.exit(1);
+  }
+
+  const server = http.createServer((req, res) => {
+    router.handle(req, res, { projectCode });
+  });
+
+  server.listen(cfg.port, () => {
+    console.log(`Project ${projectCode} running on http://localhost:${cfg.port}`);
+  });
+}
+
+// router.js
+// server.js
+const http   = require('http');
+const fs     = require('fs');
+const path   = require('path');
+const router = require('./Server/router');
+
+// load master config
+const masterConfigPath = path.join(__dirname, 'masterConfig.json');
+if (!fs.existsSync(masterConfigPath)) {
+  console.error('masterConfig.json not found');
+  process.exit(1);
+}
+
+const masterConfig = JSON.parse(fs.readFileSync(masterConfigPath, 'utf8'));
+
+// create one server per project code
+for (const [projectCode, cfg] of Object.entries(masterConfig)) {
+  if (!cfg.port) {
+    console.error(`Project ${projectCode} has no port`);
+    process.exit(1);
+  }
+
+  const server = http.createServer((req, res) => {
+    router.handle(req, res, { projectCode });
+  });
+
+  server.listen(cfg.port, () => {
+    console.log(`Project ${projectCode} running on http://localhost:${cfg.port}`);
+  });
+}
+
+// pages.js
+async function getProjectCode() {
+  const res = await fetch('/api/project-code');
+  if (!res.ok) throw new Error('Failed to load /api/project-code');
+  const cfg = await res.json();
+  return cfg.projectCode;
+}
+
+async function initGrid() {
+  const projectCode = await getProjectCode();
+
+  // pattern you want:
+  // 'proj/PROJECTCODE/FILES/FLOW/DATA.CSV'
+  const csvPath = `proj/${projectCode}/FILES/FLOW/DATA.CSV`;
+
+  // or if you still use /data/:
+  // const csvPath = `/data/${projectCode}/FILES/FLOW/DATA.CSV`;
+
+  // fetch and build your w2ui grid using csvPath
+}
+
+// main config
+{
+  "P001": { "port": 8000 },
+  "P002": { "port": 8001 }
+}
