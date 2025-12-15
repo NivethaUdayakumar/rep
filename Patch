@@ -1,0 +1,87 @@
+// step null = main grid, step 0+ = drilldown steps
+_applyColumnTypes(grid, step) {
+  if (!grid || !Array.isArray(grid.columns)) return;
+
+  const isMain = step == null;
+  const cfgBase = isMain ? this.columnTypesMain : (this.columnTypesByStep?.[step] || {});
+  if (!cfgBase || typeof cfgBase !== 'object') return;
+
+  grid.searches = Array.isArray(grid.searches) ? grid.searches : [];
+  grid.multiSearch = true;
+
+  const cols = grid.columns;
+  const recs = grid.records || [];
+
+  const findCol = (keyRaw) => {
+    if (typeof keyRaw === 'number' || /^[0-9]+$/.test(String(keyRaw))) {
+      return cols[Number(keyRaw)];
+    }
+    const key = String(keyRaw).toLowerCase();
+    return cols.find(c =>
+      String(c.field || '').toLowerCase() === key ||
+      String(c.text || c.caption || '').toLowerCase() === key
+    );
+  };
+
+  Object.entries(cfgBase).forEach(([key, typeSpec]) => {
+    const col = findCol(key);
+    if (!col || !col.field) return;
+
+    const field = col.field;
+    const w2type = this._normalizeSearchType(typeSpec);
+    if (!w2type) return;
+
+    const caption = col.text || col.caption || field;
+
+    // build per-type operators/options once
+    let operators = null;
+    let options = null;
+
+    if (w2type === 'float' || w2type === 'int') {
+      operators = ['is', 'between', 'more', 'less', 'more equal', 'less equal', 'null', 'not null'];
+    } else if (w2type === 'text') {
+      operators = ['contains', 'not contains'];
+    } else if (w2type === 'date' || w2type === 'datetime') {
+      operators = ['is', 'between'];
+    } else if (w2type === 'enum') {
+      const set = new Set();
+      for (const r of recs) {
+        const v = r[field];
+        if (v !== null && v !== undefined && String(v).trim() !== '') set.add(String(v));
+      }
+      options = { items: Array.from(set).sort() };
+      operators = ['in', 'not in', 'contains', 'not contains'];
+    }
+
+    // IMPORTANT: set on column.searchable as OBJECT so w2ui popup uses it
+    col.searchable = {
+      field,
+      type: w2type,
+      operators: operators || undefined,
+      options: options || undefined
+    };
+
+    // keep your hint too (used by your custom filter)
+    col._mdSearchType = w2type;
+
+    // also keep grid.searches consistent
+    let s = grid.searches.find(x => x.field === field);
+    if (!s) {
+      s = { field, caption, type: w2type };
+      grid.searches.push(s);
+    } else {
+      s.type = w2type;
+      if (!s.caption) s.caption = caption;
+    }
+    if (operators) s.operators = operators;
+    if (options) {
+      s.options = s.options || {};
+      s.options.items = options.items;
+    }
+  });
+
+  // Force w2ui to rebuild search internals so popup reflects new types
+  try { grid.initAllFields?.(); } catch {}
+  try { grid.toolbar?.refresh?.(); } catch {}
+  try { grid.refresh?.(); } catch {}
+}
