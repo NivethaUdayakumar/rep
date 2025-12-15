@@ -1,0 +1,93 @@
+You are right. The root cause is simpler than it looks:
+
+_applyColumnTypes() is being called for popup grids, but it runs too early.
+When the popup grid is created, w2ui builds its Advanced Search UI lazily. Later, when the search popup opens, w2ui re-derives search fields from columns[].searchable and silently overwrites grid.searches. That is why only the main grid behaves correctly.
+
+So the fix is not “call it again”, but re-apply column types after the popup grid is fully initialized and right before search UI is used.
+
+⸻
+
+The correct fix (robust and minimal)
+
+1️⃣ Add a helper that reapplies column types and forces rebuild
+
+Add this method to MultiDrilldown:
+
+_reapplyColumnTypesForPopup(grid, step) {
+  if (!grid) return;
+
+  // wipe any auto-generated search config
+  grid.searches = [];
+  grid.multiSearch = true;
+
+  // re-apply declared types
+  this._applyColumnTypes(grid, step);
+
+  // force w2ui to rebuild advanced search fields
+  try { grid.initAllFields?.(); } catch {}
+  try { grid.toolbar?.refresh?.(); } catch {}
+}
+
+
+⸻
+
+2️⃣ Call it after the popup grid is created and rendered
+
+In _renderOneViewer, locate this block:
+
+const tb = new TableBuilder({ dataCsv: url, box: `#${gname}_box`, name: gname });
+await tb.build();
+try { w2ui[gname]?.resize(); } catch {}
+
+Immediately after this, add:
+
+const dd = w2ui[gname];
+
+// IMPORTANT: reapply column types AFTER grid exists
+this._reapplyColumnTypesForPopup(dd, step);
+
+// snapshot original records
+dd._mdAllRecords = (dd.records || []).slice();
+
+// enable search logic
+this._enableMultiSearch(dd);
+
+And remove these two earlier calls to avoid confusion:
+
+// REMOVE these older calls
+// this._applyColumnTypes(dd, step);
+// this._enableMultiSearch(dd);
+
+
+⸻
+
+Why this works (the real reason)
+	•	TableBuilder.build() creates the grid
+	•	w2ui internally sets column.searchable = true (string default)
+	•	when the Advanced Search popup opens, w2ui re-reads columns[].searchable
+	•	your types were already lost by then
+
+By:
+	•	clearing grid.searches
+	•	re-applying types to both grid.searches and columns[].searchable
+	•	forcing initAllFields()
+
+you lock the popup grid into your declared datatypes.
+
+⸻
+
+Sanity check
+
+After this fix:
+	•	main grid search stays correct
+	•	popup grid search shows:
+	•	numbers: <, >, <=, >=, ==
+	•	string enums: in / not in with dropdown
+	•	dates: is / between
+	•	no fallback to default text search
+
+This is the exact same approach needed when w2ui grids are created dynamically inside popups or tabs.
+
+If you want, next we can:
+	•	auto-inherit main grid column types into popup grids
+	•	or add a debug overlay showing detected type per column
